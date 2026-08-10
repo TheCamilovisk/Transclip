@@ -967,6 +967,36 @@ mod tests {
     }
 
     #[test]
+    fn next_cycle_starts_after_cancel_acknowledgement() {
+        // The manual check: after the worker confirms cancellation, the
+        // controller returns to Ready and the next Ctrl+R starts a fresh
+        // recording with a new job (plan step 4, ADR-11).
+        let mut h = harness();
+        let id = start_transcribing(&mut h);
+        h.app.on_command(UserCommand::Cancel);
+        h.app.on_event(AppEvent::TranscriptionCancelled { id });
+        assert!(matches!(h.app.mode(), AppMode::Ready));
+
+        h.fake.clear_calls();
+        h.app.on_command(UserCommand::ToggleRecording);
+        assert!(matches!(h.app.mode(), AppMode::Recording));
+        assert_eq!(h.fake.calls(), vec![RecorderCall::Start]);
+
+        h.app.on_command(UserCommand::ToggleRecording);
+        let job = h.rx.recv().expect("the next cycle submits a job");
+        assert_eq!(
+            job.id,
+            TranscriptionId::new(2),
+            "the next job carries the next monotonic id"
+        );
+        assert_transcribing(h.app.mode(), TranscribingPhase::Running);
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "nothing is copied for the cancelled cycle (functional spec 14)"
+        );
+    }
+
+    #[test]
     fn failed_during_running_returns_to_ready_with_error() {
         let mut h = harness();
         let id = start_transcribing(&mut h);
@@ -1031,6 +1061,50 @@ mod tests {
         assert!(
             h.clipboard.calls().is_empty(),
             "a stale completion never copies (functional spec 14)"
+        );
+    }
+
+    #[test]
+    fn stale_cancelled_and_failed_events_are_ignored() {
+        // No active transcription: cancelled/failed events for any ID are
+        // stale (plan step 5 — late events must never alter state).
+        let mut h = harness();
+        for stale in [
+            AppEvent::TranscriptionCancelled {
+                id: TranscriptionId::new(7),
+            },
+            AppEvent::TranscriptionFailed {
+                id: TranscriptionId::new(7),
+                message: "stale failure".to_string(),
+            },
+        ] {
+            let outcome = h.app.on_event(stale);
+            assert!(!outcome.view_changed);
+            assert!(outcome.lines.is_empty());
+            assert!(matches!(h.app.mode(), AppMode::Ready));
+        }
+
+        // Active transcription with id 1: cancelled/failed events for a
+        // different id (2) must not disturb it.
+        h.app.on_command(UserCommand::ToggleRecording);
+        h.app.on_command(UserCommand::ToggleRecording);
+        for stale in [
+            AppEvent::TranscriptionCancelled {
+                id: TranscriptionId::new(2),
+            },
+            AppEvent::TranscriptionFailed {
+                id: TranscriptionId::new(2),
+                message: "other job".to_string(),
+            },
+        ] {
+            let outcome = h.app.on_event(stale);
+            assert!(!outcome.view_changed);
+            assert!(outcome.lines.is_empty());
+            assert_transcribing(h.app.mode(), TranscribingPhase::Running);
+        }
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "stale cancelled/failed events never copy (functional spec 14)"
         );
     }
 

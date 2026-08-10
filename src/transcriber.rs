@@ -850,6 +850,47 @@ mod tests {
     }
 
     #[test]
+    fn worker_acknowledges_only_after_the_job_is_released() {
+        // Plan step 6 / ADR-11: the worker must emit its terminal outcome
+        // only after the active job has stopped and released the single
+        // model owner. While `transcribe` is still running, no event may
+        // reach the controller — otherwise the controller could start a new
+        // cycle while the model is still busy.
+        let (handle, probe, job_tx, event_rx) = spawn_fake_worker(vec![FakeBehavior::Success {
+            delay: Duration::from_millis(150),
+        }]);
+
+        job_tx
+            .send(make_job(1, Arc::new(AtomicBool::new(false))))
+            .unwrap();
+
+        // Mid-inference: the job is still in flight and no acknowledgement
+        // has been emitted.
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            probe.in_flight.load(Ordering::SeqCst),
+            1,
+            "transcribe must still be running"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "no acknowledgement while the job is in flight (plan step 6)"
+        );
+
+        // Only once transcribe has returned (the job released the model) is
+        // the single terminal outcome sent.
+        assert_eq!(event_rx.recv().unwrap(), completed(1, "result 1"));
+        assert_eq!(
+            probe.in_flight.load(Ordering::SeqCst),
+            0,
+            "the job must be released before the acknowledgement"
+        );
+
+        drop(job_tx);
+        assert!(handle.join_with_timeout(Duration::from_secs(1)));
+    }
+
+    #[test]
     fn pre_set_cancel_flag_reports_cancelled_without_inference() {
         let (handle, probe, job_tx, event_rx) = spawn_fake_worker(vec![]);
 
