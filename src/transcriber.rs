@@ -272,6 +272,13 @@ impl WhisperTranscriber {
     /// decoding state. Failure here is a worker startup failure reported by
     /// the startup handshake before Ready (decision D5).
     pub fn new(context: WhisperContext) -> Result<Self, String> {
+        // The app owns the terminal, so whisper.cpp and GGML logs (model
+        // init INFO lines, and — in debug builds — per-token WHISPER_DEBUG
+        // dumps) must not reach stdout. With no `log_backend`/`tracing_backend`
+        // feature enabled, `install_logging_hooks` routes them into a no-op
+        // trampoline (whisper-rs 0.16 `install_logging_hooks`). Safe to call
+        // multiple times; only the first call has an effect.
+        whisper_rs::install_logging_hooks();
         let state = context.create_state().map_err(|e| e.to_string())?;
         Ok(Self { state })
     }
@@ -292,11 +299,14 @@ impl Transcriber for WhisperTranscriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        // The pinned artifact is the multilingual base model; detect the
-        // spoken language instead of forcing the whisper.cpp default "en"
-        // (verified: detect_language overrides the language at whisper.cpp
-        // line 6812).
-        params.set_detect_language(true);
+        // Language: whisper.cpp's default language is "en"
+        // (whisper_full_default_params, whisper.cpp 1.8.3 — decision D5).
+        // `set_detect_language(true)` is deliberately NOT used: empirically it
+        // returns zero segments on the pinned multilingual base model in this
+        // build (verified 2026-08-10 against jfk.wav: greedy and beam both
+        // yield segments=0 with detection on, while the default language
+        // yields the expected transcript), so detection would make every real
+        // transcription empty (functional spec 19.9).
         // Cooperative cancellation (decision D2): whisper.cpp polls this
         // callback between encode/decode passes; on true it aborts and
         // returns an error code (verified in the vendored whisper.cpp 1.8.3).

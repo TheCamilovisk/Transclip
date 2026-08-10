@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
+use crate::clipboard::Clipboard;
 use crate::recorder::{RecordedAudio, Recorder};
 use crate::terminal::{self, Renderer, TerminalError};
 
@@ -123,21 +124,27 @@ pub struct AppOutcome {
 }
 
 /// The application controller (architecture section 5.1). Owns the current
-/// mode, the recorder, and the bounded transcription job channel; all state
-/// transitions happen here and only here.
+/// mode, the recorder, the clipboard, and the bounded transcription job
+/// channel; all state transitions happen here and only here.
 pub struct App {
     mode: AppMode,
     next_id: u64,
     recorder: Box<dyn Recorder>,
+    clipboard: Box<dyn Clipboard>,
     jobs: mpsc::SyncSender<TranscriptionJob>,
 }
 
 impl App {
-    pub fn new(recorder: Box<dyn Recorder>, jobs: mpsc::SyncSender<TranscriptionJob>) -> Self {
+    pub fn new(
+        recorder: Box<dyn Recorder>,
+        clipboard: Box<dyn Clipboard>,
+        jobs: mpsc::SyncSender<TranscriptionJob>,
+    ) -> Self {
         Self {
             mode: AppMode::Ready,
             next_id: 1,
             recorder,
+            clipboard,
             jobs,
         }
     }
@@ -299,15 +306,29 @@ impl App {
         }
         self.mode = AppMode::Ready;
         match phase {
-            TranscribingPhase::Running => AppOutcome {
-                view_changed: true,
-                // A clearly labeled final transcription enters the persistent
-                // output area (plan step 7, functional spec section 6);
-                // clipboard copy arrives in slice 5 (architecture 18).
-                lines: vec!["Transcription:".to_string(), String::new(), text],
-            },
+            TranscribingPhase::Running => {
+                // Successful completion (functional spec section 6): the
+                // exact final text enters the persistent output area first
+                // (plan step 4 — append-only history, decision D6), then the
+                // same text is copied byte-for-byte, and the outcome is
+                // reported. A copy failure never discards or reclassifies
+                // the successful transcription (functional spec 15.4,
+                // decision R4).
+                let mut lines = vec!["Transcription:".to_string(), String::new(), text.clone()];
+                match self.clipboard.copy_text(&text) {
+                    Ok(()) => lines.push("Copied to clipboard.".to_string()),
+                    Err(err) => lines.push(format!(
+                        "Warning: unable to copy transcription to clipboard: {err}"
+                    )),
+                }
+                AppOutcome {
+                    view_changed: true,
+                    lines,
+                }
+            }
             // Decision R3: a completion received after cancellation was
-            // requested is discarded, even if inference finished first. The
+            // requested is discarded, even if inference finished first. No
+            // text is printed or copied during the cancelling phase. The
             // worker stopping still returns us to Ready.
             TranscribingPhase::Cancelling => AppOutcome {
                 view_changed: true,
@@ -432,6 +453,7 @@ fn render_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::{Clipboard, ClipboardError};
     use crate::recorder::RecorderError;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -489,9 +511,46 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ClipboardCall {
+        text: String,
+    }
+
+    /// Fake clipboard that records every copy and returns a configurable
+    /// result — the developer's real clipboard is never touched (architecture
+    /// section 45, plan step 1).
+    #[derive(Clone)]
+    struct FakeClipboard {
+        calls: Rc<RefCell<Vec<ClipboardCall>>>,
+        result: Result<(), ClipboardError>,
+    }
+
+    impl FakeClipboard {
+        fn new() -> Self {
+            Self {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                result: Ok(()),
+            }
+        }
+
+        fn calls(&self) -> Vec<ClipboardCall> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Clipboard for FakeClipboard {
+        fn copy_text(&mut self, text: &str) -> Result<(), ClipboardError> {
+            self.calls.borrow_mut().push(ClipboardCall {
+                text: text.to_string(),
+            });
+            self.result.clone()
+        }
+    }
+
     struct Harness {
         app: App,
         fake: FakeRecorder,
+        clipboard: FakeClipboard,
         rx: mpsc::Receiver<TranscriptionJob>,
     }
 
@@ -500,12 +559,26 @@ mod tests {
     }
 
     fn harness_with(fake: FakeRecorder) -> Harness {
+        harness_with_clipboard(fake, FakeClipboard::new())
+    }
+
+    fn harness_with_clipboard(fake: FakeRecorder, clipboard: FakeClipboard) -> Harness {
         let (tx, rx) = mpsc::sync_channel(1);
         Harness {
-            app: App::new(Box::new(fake.clone()), tx),
+            app: App::new(Box::new(fake.clone()), Box::new(clipboard.clone()), tx),
             fake,
+            clipboard,
             rx,
         }
+    }
+
+    /// Drives one full cycle to the point where a transcription outcome can
+    /// be delivered: Ready → Recording → Transcribing, returning the active
+    /// job id.
+    fn start_transcribing(h: &mut Harness) -> TranscriptionId {
+        h.app.on_command(UserCommand::ToggleRecording);
+        h.app.on_command(UserCommand::ToggleRecording);
+        h.rx.recv().expect("a job must be submitted").id
     }
 
     fn transcribing(phase: TranscribingPhase, id: u64) -> AppMode {
@@ -546,6 +619,10 @@ mod tests {
         assert!(outcome.lines.is_empty());
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert!(h.fake.calls().is_empty());
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "an ignored command never copies"
+        );
     }
 
     #[test]
@@ -586,6 +663,10 @@ mod tests {
             h.rx.try_recv().is_err(),
             "a cancelled recording must not submit a job"
         );
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "a cancelled recording never copies (functional spec 14)"
+        );
     }
 
     #[test]
@@ -604,6 +685,10 @@ mod tests {
         assert!(
             h.rx.try_recv().is_err(),
             "Ctrl+R during Transcribing must not submit another job"
+        );
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "an ignored command during Transcribing never copies"
         );
     }
 
@@ -646,6 +731,10 @@ mod tests {
         assert!(outcome.lines.is_empty());
         assert_transcribing(h.app.mode(), TranscribingPhase::Cancelling);
         assert!(h.fake.calls().is_empty());
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "commands while Cancelling never copy"
+        );
     }
 
     // ---- Error paths (functional spec section 15) ----
@@ -663,6 +752,10 @@ mod tests {
         assert_eq!(
             outcome.lines,
             vec!["Error: unable to start recording: unable to access microphone"]
+        );
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "a failed start never copies"
         );
     }
 
@@ -682,14 +775,16 @@ mod tests {
             vec!["Error: unable to stop recording: stream died"]
         );
         assert!(h.rx.try_recv().is_err(), "no job on a failed stop");
+        assert!(h.clipboard.calls().is_empty(), "a failed stop never copies");
     }
 
     #[test]
     fn submission_failure_returns_to_ready() {
         let fake = FakeRecorder::new();
+        let clipboard = FakeClipboard::new();
         let (tx, rx) = mpsc::sync_channel::<TranscriptionJob>(1);
         drop(rx); // worker unavailable
-        let mut app = App::new(Box::new(fake.clone()), tx);
+        let mut app = App::new(Box::new(fake.clone()), Box::new(clipboard.clone()), tx);
         app.on_command(UserCommand::ToggleRecording);
 
         let outcome = app.on_command(UserCommand::ToggleRecording);
@@ -698,6 +793,10 @@ mod tests {
         assert_eq!(
             outcome.lines,
             vec!["Error: unable to start transcription: worker unavailable"]
+        );
+        assert!(
+            clipboard.calls().is_empty(),
+            "a worker-unavailable submission never copies"
         );
     }
 
@@ -720,6 +819,10 @@ mod tests {
             vec![RecorderCall::Start, RecorderCall::Cancel],
             "unusable audio must be discarded"
         );
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "a recording failure never copies"
+        );
     }
 
     #[test]
@@ -732,16 +835,18 @@ mod tests {
         assert!(outcome.lines.is_empty());
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert!(h.fake.calls().is_empty());
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "an out-of-state event never copies"
+        );
     }
 
     // ---- Transcription outcomes (architecture section 17) ----
 
     #[test]
-    fn completed_during_running_prints_labeled_text_and_returns_to_ready() {
+    fn completed_during_running_prints_text_copies_and_reports_success() {
         let mut h = harness();
-        h.app.on_command(UserCommand::ToggleRecording);
-        h.app.on_command(UserCommand::ToggleRecording);
-        let id = h.rx.recv().unwrap().id;
+        let id = start_transcribing(&mut h);
 
         let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
             id,
@@ -751,17 +856,82 @@ mod tests {
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert_eq!(
             outcome.lines,
-            vec!["Transcription:", "", "hello world"],
-            "the final transcription is clearly labeled (plan step 7)"
+            vec!["Transcription:", "", "hello world", "Copied to clipboard.",],
+            "the final transcription is clearly labeled, then copied (plan step 3)"
+        );
+        assert_eq!(
+            h.clipboard.calls(),
+            vec![ClipboardCall {
+                text: "hello world".to_string()
+            }],
+            "the clipboard is invoked exactly once with the printed text (functional spec 14)"
+        );
+    }
+
+    #[test]
+    fn copied_text_matches_printed_text_byte_for_byte() {
+        let mut h = harness();
+        let id = start_transcribing(&mut h);
+        // Deliberately non-trivial text (whitespace, unicode, newline) so the
+        // byte-identity guarantee between print and copy is actually exercised.
+        let text = "Olá mundo!\n  segunda linha\tcom tab".to_string();
+
+        let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
+            id,
+            text: text.clone(),
+        });
+        assert_eq!(outcome.lines[3], "Copied to clipboard.");
+        assert_eq!(
+            outcome.lines[2], text,
+            "printed line must equal the copied text"
+        );
+        assert_eq!(
+            h.clipboard.calls(),
+            vec![ClipboardCall { text: text.clone() }],
+            "clipboard content must match the printed transcription (functional spec 14)"
+        );
+    }
+
+    #[test]
+    fn clipboard_failure_keeps_transcription_and_warns() {
+        let mut h = harness_with_clipboard(
+            FakeRecorder::new(),
+            FakeClipboard {
+                result: Err(ClipboardError("no clipboard service reachable".to_string())),
+                ..FakeClipboard::new()
+            },
+        );
+        let id = start_transcribing(&mut h);
+
+        let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
+            id,
+            text: "hello world".to_string(),
+        });
+        assert!(outcome.view_changed);
+        assert!(matches!(h.app.mode(), AppMode::Ready));
+        assert_eq!(
+            outcome.lines,
+            vec![
+                "Transcription:",
+                "",
+                "hello world",
+                "Warning: unable to copy transcription to clipboard: no clipboard service reachable",
+            ],
+            "a clipboard failure still prints the transcription, then warns (functional spec 15.4)"
+        );
+        assert_eq!(
+            h.clipboard.calls(),
+            vec![ClipboardCall {
+                text: "hello world".to_string()
+            }],
+            "the copy is still attempted exactly once"
         );
     }
 
     #[test]
     fn completed_after_cancel_is_discarded_but_returns_to_ready() {
         let mut h = harness();
-        h.app.on_command(UserCommand::ToggleRecording);
-        h.app.on_command(UserCommand::ToggleRecording);
-        let id = h.rx.recv().unwrap().id;
+        let id = start_transcribing(&mut h);
         h.app.on_command(UserCommand::Cancel);
 
         let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
@@ -774,28 +944,32 @@ mod tests {
             outcome.lines.is_empty(),
             "a completion after cancellation must be discarded (R3)"
         );
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "no copy during the cancelling phase (plan step 5)"
+        );
     }
 
     #[test]
     fn cancelled_during_cancelling_returns_to_ready() {
         let mut h = harness();
-        h.app.on_command(UserCommand::ToggleRecording);
-        h.app.on_command(UserCommand::ToggleRecording);
-        let id = h.rx.recv().unwrap().id;
+        let id = start_transcribing(&mut h);
         h.app.on_command(UserCommand::Cancel);
 
         let outcome = h.app.on_event(AppEvent::TranscriptionCancelled { id });
         assert!(outcome.view_changed);
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert!(outcome.lines.is_empty());
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "a cancelled transcription never copies (functional spec 14)"
+        );
     }
 
     #[test]
     fn failed_during_running_returns_to_ready_with_error() {
         let mut h = harness();
-        h.app.on_command(UserCommand::ToggleRecording);
-        h.app.on_command(UserCommand::ToggleRecording);
-        let id = h.rx.recv().unwrap().id;
+        let id = start_transcribing(&mut h);
 
         let outcome = h.app.on_event(AppEvent::TranscriptionFailed {
             id,
@@ -807,14 +981,16 @@ mod tests {
             outcome.lines,
             vec!["Error: transcription failed: no speech detected"]
         );
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "a failed transcription never copies (functional spec 14)"
+        );
     }
 
     #[test]
     fn failed_during_cancelling_returns_to_ready_silently() {
         let mut h = harness();
-        h.app.on_command(UserCommand::ToggleRecording);
-        h.app.on_command(UserCommand::ToggleRecording);
-        let id = h.rx.recv().unwrap().id;
+        let id = start_transcribing(&mut h);
         h.app.on_command(UserCommand::Cancel);
 
         let outcome = h.app.on_event(AppEvent::TranscriptionFailed {
@@ -824,6 +1000,10 @@ mod tests {
         assert!(outcome.view_changed, "worker stopped: back to Ready");
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert!(outcome.lines.is_empty());
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "no copy while cancelling (plan step 5)"
+        );
     }
 
     #[test]
@@ -848,6 +1028,10 @@ mod tests {
         assert!(!outcome.view_changed);
         assert!(outcome.lines.is_empty());
         assert_transcribing(h.app.mode(), TranscribingPhase::Running);
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "a stale completion never copies (functional spec 14)"
+        );
     }
 
     #[test]
@@ -861,6 +1045,10 @@ mod tests {
         assert!(!outcome.view_changed);
         assert!(outcome.lines.is_empty());
         assert_transcribing(h.app.mode(), TranscribingPhase::Running);
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "an unrequested cancellation never copies"
+        );
     }
 
     #[test]
@@ -877,6 +1065,19 @@ mod tests {
             });
             assert!(outcome.view_changed);
             assert!(matches!(h.app.mode(), AppMode::Ready));
+            let calls = h.clipboard.calls();
+            assert_eq!(
+                calls.len(),
+                expected as usize,
+                "each successful cycle copies exactly once"
+            );
+            assert_eq!(
+                calls.last().unwrap(),
+                &ClipboardCall {
+                    text: format!("result {expected}")
+                },
+                "the copy carries that cycle's result text"
+            );
         }
     }
 
