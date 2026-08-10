@@ -14,9 +14,13 @@ Usage: publish-vs-branch.sh [--dry-run] [--json] [--repo OWNER/NAME]
                             [--base BRANCH] [--body-file FILE]
 
 Pushes the current vs-NNN_kebab-case-title branch and creates or returns its
-pull request. The default target branch is dev. The PR body ends with
-`Closes #<issue>`, so merging the PR auto-closes the linked slice issue. The
-script itself never approves or merges a PR and never closes an issue directly.
+pull request. The default target branch is dev. The issue number is resolved
+by title via resolve-slice-issue.sh (never assumed to equal the slice
+number); the PR body ends with `Closes #<issue>`. GitHub only honors closing
+keywords on the default branch, so the repository workflow
+.github/workflows/close-linked-issues.yml closes the issue when the PR is
+merged into dev. The script itself never approves or merges a PR and never
+closes an issue directly.
 EOF
   exit "${1:-0}"
 }
@@ -70,15 +74,19 @@ if [[ -z "$slice_id" ]]; then
 fi
 slice_number=$((10#$slice_id))
 
-issue="$(gh issue view "$slice_number" --repo "$REPO" --json title,body,url -q . 2>/dev/null || true)"
+# Resolve the actual issue number by title — it is never assumed to equal the
+# slice number (issues and PRs share GitHub's number space).
+issue_number="$("$SCRIPT_DIR/resolve-slice-issue.sh" --repo "$REPO" "$slice_id")" || exit 1
+
+issue="$(gh issue view "$issue_number" --repo "$REPO" --json title,body,url -q . 2>/dev/null || true)"
 if [[ -z "$issue" ]]; then
-  echo "error: issue #$slice_number not found in $REPO (is gh authenticated?)" >&2
+  echo "error: issue #$issue_number not found in $REPO (is gh authenticated?)" >&2
   exit 1
 fi
 issue_title="$(printf '%s' "$issue" | jq -r '.title')"
 issue_prefix="[VS-$slice_id]"
 if [[ "$issue_title" != "$issue_prefix"\ -* ]]; then
-  echo "error: issue #$slice_number title must begin '$issue_prefix -': $issue_title" >&2
+  echo "error: issue #$issue_number title must begin '$issue_prefix -': $issue_title" >&2
   exit 1
 fi
 title="VS-$slice_id: ${issue_title#"$issue_prefix - "}"
@@ -137,7 +145,7 @@ if [[ -n "$BODY_FILE" ]]; then
 else
   body="$(jq -Rsr \
     --arg title "$title" \
-    --arg issue_number "$slice_number" \
+    --arg issue_number "$issue_number" \
     --arg plan_path "$plan_path" \
     --arg outcome "$outcome" \
     --arg diff_stat "$diff_stat" \

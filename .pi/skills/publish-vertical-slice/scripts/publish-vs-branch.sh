@@ -3,7 +3,9 @@
 # publish-vs-branch.sh — Push the current vertical-slice branch and open a PR to dev.
 #
 # For the current `vs-XXX_kebab-case-title` branch:
-#   1. validates the branch name and resolves the matching [VS-NNN] issue;
+#   1. validates the branch name and resolves the matching [VS-NNN] issue by
+#      title via resolve-slice-issue.sh (the issue number is looked up, never
+#      assumed to equal the slice number);
 #   2. derives the PR title (`VS-001: Startup and Model Readiness`) and fills
 #      the PR body template (templates/pr-body.md) with the issue number, plan
 #      path, plan Outcome, diff stat vs the base branch, plan Manual Checks,
@@ -13,9 +15,12 @@
 #      existing PR if one already exists — never a duplicate;
 #   5. prints the PR URL.
 #
-# The PR body ends with `Closes #<issue>` (filled from the issue number), so
-# merging the PR auto-closes the linked slice issue. The script itself still
-# never approves or merges a PR and never closes an issue directly.
+# The PR body ends with `Closes #<issue>` (filled from the resolved issue
+# number). GitHub only honors closing keywords when a PR targets the default
+# branch (`main`); these PRs target `dev`, so the repository workflow
+# `.github/workflows/close-linked-issues.yml` performs the actual close when
+# the PR is merged. The script itself still never approves or merges a PR and
+# never closes an issue directly.
 #
 # Usage:
 #   publish-vs-branch.sh [--dry-run] [--json] [--repo OWNER/NAME]
@@ -91,10 +96,14 @@ if [[ -z "$vs_pad" ]]; then
 fi
 vs_num=$((10#$vs_pad))
 
-# Fetch the matching issue; the issue number equals the slice number.
-issue_json="$(gh issue view "$vs_num" --repo "$REPO" --json number,title,body,url -q . 2>/dev/null || true)"
+# Resolve the actual issue number by title — it is never assumed to equal the
+# slice number (issues and PRs share GitHub's number space).
+issue_number="$("$SCRIPT_DIR/resolve-slice-issue.sh" --repo "$REPO" "$vs_pad")" || exit 1
+
+# Fetch the matching issue.
+issue_json="$(gh issue view "$issue_number" --repo "$REPO" --json number,title,body,url -q . 2>/dev/null || true)"
 if [[ -z "$issue_json" ]]; then
-  echo "error: issue #$vs_num not found in $REPO (is gh authenticated?)" >&2
+  echo "error: issue #$issue_number not found in $REPO (is gh authenticated?)" >&2
   exit 1
 fi
 issue_title="$(printf '%s' "$issue_json" | jq -r '.title')"
@@ -175,7 +184,7 @@ render_body() {
   else
     jq -Rsr \
       --arg pr_title "$pr_title" \
-      --arg issue_number "$vs_num" \
+      --arg issue_number "$issue_number" \
       --arg plan_path "$plan_path" \
       --arg outcome "$outcome" \
       --arg diff_stat "$diff_stat" \

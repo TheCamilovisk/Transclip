@@ -5,13 +5,13 @@ description: Publishes the current vertical-slice branch and opens a pull reques
 
 # Publish Vertical Slice
 
-Push the current vertical-slice branch and open a pull request to `dev`, then report the PR link. The PR body ends with `Closes #<issue-number>`, so merging the PR auto-closes the linked slice issue. The PR is created but never approved or merged — approval/merge is always left to the user.
+Push the current vertical-slice branch and open a pull request to `dev`, then report the PR link. The PR body ends with `Closes #<resolved-issue-number>`; when the PR is merged, the slice issue closes (via the repository's `.github/workflows/close-linked-issues.yml`, because GitHub's own closing keywords only work on the default branch). The PR is created but never approved or merged — approval/merge is always left to the user.
 
 This skill is the publishing counterpart of `implement-vertical-slice` (which prepares the branch and implements the slice) and `next-vertical-slice` (which selects the slice). It is self-contained: the script and PR template live in this skill directory.
 
 ## Input
 
-Run it while on a vertical-slice branch named `vs-XXX_kebab-case-title` (e.g. `vs-001_startup-and-model-readiness`). The slice's GitHub issue must exist and be titled `[VS-NNN] - Title`; the issue number must equal the slice number (`VS-001` → issue #1), per the `create-vertical-slice-issue` convention.
+Run it while on a vertical-slice branch named `vs-XXX_kebab-case-title` (e.g. `vs-001_startup-and-model-readiness`). The slice's GitHub issue must exist, be titled `[VS-NNN] - Title`, and carry the `ai:vertical-slice` label. Its actual issue number is resolved by title via `scripts/resolve-slice-issue.sh` — it is never assumed to equal the slice number (issues and PRs share GitHub's number space).
 
 ## Procedure
 
@@ -24,17 +24,21 @@ Run the helper script:
 
 ### What the script does
 
-1. Validates the current branch matches `vs-XXX_...` and resolves the matching `[VS-NNN]` issue.
+1. Validates the current branch matches `vs-XXX_...` and resolves the matching `[VS-NNN]` issue **by title** via `scripts/resolve-slice-issue.sh` (exactly one issue with that `[VS-NNN]` prefix must exist; the script fails on none or several).
 2. Derives the PR title: `[VS-001] - Startup and Model Readiness` → `VS-001: Startup and Model Readiness`.
 3. Renders the PR body from `templates/pr-body.md`, filling in:
-   - issue number and plan path (parsed from the issue body's `## Vertical Slice Plan` section);
+   - the resolved issue number and plan path (parsed from the issue body's `## Vertical Slice Plan` section);
    - the plan's `## Outcome` (Summary), `## Manual Checks`, and `## Acceptance Criteria`;
    - `git diff --stat origin/<base>...HEAD` (What's included);
-   - a trailing `Closes #<issue>` line, so merging the PR closes the slice issue.
+   - a trailing `Closes #<resolved-issue>` line.
    A missing plan file or section only produces a warning — it does not abort.
 4. Fetches, pushes the branch (`git push -u origin <branch>`), and creates the pull request against `dev` (or `--base`).
 5. Reuses an existing PR for the branch instead of creating a duplicate (`status: exists`).
 6. Prints the PR URL (`pr: https://...`), or a JSON object with `--json`.
+
+### Closing the slice issue on merge
+
+GitHub only interprets closing keywords (`Closes #N` etc.) when the PR targets the repository's default branch (`main`). Vertical-slice PRs target `dev`, so the keyword is ignored there. Instead, `.github/workflows/close-linked-issues.yml` performs the close: when a PR to `dev` is merged, it closes every `ai:vertical-slice`-labeled issue referenced with a closing keyword in the PR body. Both files must stay in sync — if the body ever stops carrying the `Closes #<issue>` line, the workflow closes nothing.
 
 ### Options
 
@@ -59,9 +63,9 @@ pr: https://github.com/TheCamilovisk/Transclip/pull/8
 
 ## Agent Responsibilities
 
-- Review the `--dry-run` output before creating the PR: confirm the title, the Summary, the trailing `Closes #<issue>` line, and that the diff stat reflects only the slice's intended changes. If the body needs richer content, pass `--body-file` with a customized body.
+- Review the `--dry-run` output before creating the PR: confirm the title, the Summary, the trailing `Closes #<resolved-issue>` line (the number comes from `resolve-slice-issue.sh`, never assumed), and that the diff stat reflects only the slice's intended changes. If the body needs richer content, pass `--body-file` with a customized body.
 - Return the PR link to the user.
-- Do **not** approve, merge, or request-review the PR, and do not close or modify the linked issue directly, unless the user explicitly asks. The issue closes automatically when the PR is merged (via the `Closes #` keyword in the body).
+- Do **not** approve, merge, or request-review the PR, and do not close or modify the linked issue directly, unless the user explicitly asks. The issue closes automatically when the PR is merged (via the `Closes #` keyword in the body, enforced by `.github/workflows/close-linked-issues.yml`).
 
 ## Exit Status
 
@@ -73,8 +77,9 @@ pr: https://github.com/TheCamilovisk/Transclip/pull/8
 
 - The branch must already contain its commits; the script only pushes, it does not commit.
 - `git push -u` on an up-to-date branch is a no-op (`Everything up-to-date`), which is fine.
-- The issue number is derived from the branch name; if the issue title's `[VS-NNN]` differs from the branch number, the script uses the branch-derived number and reports the mismatch for inspection.
+- The issue number is resolved by title (`scripts/resolve-slice-issue.sh`), not derived from the branch number; if the branch's `VS-NNN` does not match any issue title, the script fails rather than closing the wrong issue.
 - Diff stat and body are computed against `origin/<base>` after a fetch, so create or update the PR after pushing all intended commits.
+- Closing on merge requires `.github/workflows/close-linked-issues.yml` to be present on `dev` (the base of every slice PR) — GitHub's native closing keywords only work on the default branch (`main`).
 
 ## Dependencies
 
