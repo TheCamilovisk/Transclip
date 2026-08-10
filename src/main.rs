@@ -7,6 +7,7 @@
 
 mod app;
 mod audio;
+mod clipboard;
 mod recorder;
 mod terminal;
 mod transcriber;
@@ -17,6 +18,7 @@ use std::sync::mpsc;
 
 use anyhow::Context;
 use app::{App, AppEvent, TranscriptionJob};
+use clipboard::{ArboardClipboard, Clipboard};
 use recorder::{CpalRecorder, Recorder};
 use transcriber::{
     Downloader, ModelRelease, WhisperTranscriber, ensure_model, load_model, model_cache_dir,
@@ -91,7 +93,16 @@ fn run() -> anyhow::Result<()> {
         }
     }));
 
-    let mut app = App::new(recorder, job_tx);
+    // The clipboard runs on the main thread and is constructed lazily inside
+    // `ArboardClipboard` at the first copy, then kept alive for the session
+    // (on X11 arboard hosts the selection in the app and hands it to a
+    // clipboard manager when the instance drops — see decision D3). Deferring
+    // construction means a missing/headless clipboard service can never
+    // prevent startup: the failure surfaces as a per-copy warning on the
+    // accepted completion path (functional spec 15.4).
+    let clipboard: Box<dyn Clipboard> = Box::new(ArboardClipboard::new());
+
+    let mut app = App::new(recorder, clipboard, job_tx);
     let mut renderer = terminal::TerminalRenderer;
 
     let mut terminal_guard =
