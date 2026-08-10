@@ -6,13 +6,17 @@
 //! It contains minimal application logic (architecture section 31).
 
 mod app;
+mod recorder;
 mod terminal;
 mod transcriber;
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::mpsc;
 
 use anyhow::Context;
+use app::{App, AppEvent, TranscriptionJob};
+use recorder::{Recorder, UnavailableRecorder};
 use transcriber::{Downloader, ModelRelease, ensure_model, load_model, model_cache_dir};
 
 /// Provisions and loads the pinned model. Any failure here prevents the
@@ -55,9 +59,24 @@ fn run() -> anyhow::Result<()> {
         &transcriber::HttpDownloader,
     )?;
 
+    // Slice 2 wires the controller boundaries. The recorder is a placeholder
+    // until slice 3 attaches CPAL (it reports a clear error, so the Ready
+    // shell and the recorder-error path run end to end). The worker threads
+    // arrive in slice 4; the channels are created here so the controller
+    // boundaries stay fixed: `job_tx` feeds the future worker, `event_rx`
+    // feeds the loop, and `_event_tx` is held by main until the worker
+    // exists.
+    let recorder: Box<dyn Recorder> = Box::new(UnavailableRecorder);
+    let (job_tx, _job_rx) = mpsc::channel::<TranscriptionJob>();
+    let (event_tx, event_rx) = mpsc::channel::<AppEvent>();
+    let _event_tx = event_tx;
+
+    let mut app = App::new(recorder, job_tx);
+    let mut renderer = terminal::TerminalRenderer;
+
     let mut terminal_guard =
         terminal::TerminalGuard::enter().context("terminal initialization failed")?;
-    let result = app::run();
+    let result = app::run(&mut app, event_rx, &mut renderer);
     let _ = terminal_guard.restore();
     result.map_err(Into::into)
 }
