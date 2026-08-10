@@ -13,7 +13,9 @@
 #      existing PR if one already exists — never a duplicate;
 #   5. prints the PR URL.
 #
-# It never approves, merges, or closes anything.
+# The PR body ends with `Closes #<issue>` (filled from the issue number), so
+# merging the PR auto-closes the linked slice issue. The script itself still
+# never approves or merges a PR and never closes an issue directly.
 #
 # Usage:
 #   publish-vs-branch.sh [--dry-run] [--json] [--repo OWNER/NAME]

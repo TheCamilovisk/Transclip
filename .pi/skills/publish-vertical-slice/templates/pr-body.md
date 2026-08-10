@@ -21,3 +21,7 @@ Implements **{{PR_TITLE}}** (issue #{{ISSUE_NUMBER}}, plan `{{PLAN_PATH}}`).
 ## Acceptance Criteria
 
 {{ACCEPTANCE_CRITERIA}}
+
+---
+
+Closes #{{ISSUE_NUMBER}}

@@ -14,8 +14,9 @@ Usage: publish-vs-branch.sh [--dry-run] [--json] [--repo OWNER/NAME]
                             [--base BRANCH] [--body-file FILE]
 
 Pushes the current vs-NNN_kebab-case-title branch and creates or returns its
-pull request. The default target branch is dev. It never approves, merges, or
-closes anything.
+pull request. The default target branch is dev. The PR body ends with
+`Closes #<issue>`, so merging the PR auto-closes the linked slice issue. The
+script itself never approves or merges a PR and never closes an issue directly.
 EOF
   exit "${1:-0}"
 }

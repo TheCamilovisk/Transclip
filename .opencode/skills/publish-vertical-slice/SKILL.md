@@ -1,11 +1,11 @@
 ---
 name: publish-vertical-slice
-description: Push the current vertical-slice branch and create or return its pull request to dev. Use when asked to publish, push, or open a PR for a vertical slice.
+description: Push the current vertical-slice branch and create or return its pull request to dev, whose body closes the slice issue on merge. Use when asked to publish, push, or open a PR for a vertical slice.
 ---
 
 # Publish Vertical Slice
 
-Publish the current `vs-NNN_kebab-case-title` branch and return its pull-request URL. This is the OpenCode counterpart to `.pi/skills/publish-vertical-slice/`; keep both workflows aligned.
+Publish the current `vs-NNN_kebab-case-title` branch and return its pull-request URL. The PR body ends with `Closes #<issue-number>`, so merging the PR auto-closes the linked slice issue. This is the OpenCode counterpart to `.pi/skills/publish-vertical-slice/`; keep both workflows aligned.
 
 ## Procedure
 
@@ -23,7 +23,7 @@ Publish the current `vs-NNN_kebab-case-title` branch and return its pull-request
    .opencode/skills/publish-vertical-slice/scripts/publish-vs-branch.sh
    ```
 
-5. Return the `pr:` URL. Do not approve, merge, request review, or close the issue unless explicitly asked.
+5. Return the `pr:` URL. Do not approve, merge, request review, or close the issue directly unless explicitly asked. The issue closes automatically when the PR is merged (via the `Closes #` keyword in the body).
 
 ## Options
 
