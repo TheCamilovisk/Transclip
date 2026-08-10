@@ -40,11 +40,6 @@ impl TranscriptionId {
 
 /// Internal worker events (architecture section 7.2). Every transcription
 /// outcome carries its operation ID so stale events are harmless.
-///
-/// `#[allow(dead_code)]`: the variants are the slice-4 worker contract; they
-/// are constructed by the worker (slice 4) and exercised by the controller
-/// tests today.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     TranscriptionCompleted {
@@ -61,14 +56,10 @@ pub enum AppEvent {
     RecordingFailed(String),
 }
 
-/// A transcription job handed to the worker. Slice 4 attaches the worker that
-/// consumes these from the channel; the cancellation flag is shared between
-/// the controller and the worker (architecture section 16).
-///
-/// `#[allow(dead_code)]`: the fields are the slice-4 worker contract; they
-/// are read by the worker (slice 4) and exercised by the controller tests
-/// today.
-#[allow(dead_code)]
+/// A transcription job handed to the worker (architecture section 15). The
+/// worker consumes these one at a time from the bounded job channel; the
+/// cancellation flag is shared between the controller and the worker
+/// (architecture section 16).
 #[derive(Debug)]
 pub struct TranscriptionJob {
     pub id: TranscriptionId,
@@ -132,17 +123,17 @@ pub struct AppOutcome {
 }
 
 /// The application controller (architecture section 5.1). Owns the current
-/// mode, the recorder, and the transcription job channel; all state
+/// mode, the recorder, and the bounded transcription job channel; all state
 /// transitions happen here and only here.
 pub struct App {
     mode: AppMode,
     next_id: u64,
     recorder: Box<dyn Recorder>,
-    jobs: mpsc::Sender<TranscriptionJob>,
+    jobs: mpsc::SyncSender<TranscriptionJob>,
 }
 
 impl App {
-    pub fn new(recorder: Box<dyn Recorder>, jobs: mpsc::Sender<TranscriptionJob>) -> Self {
+    pub fn new(recorder: Box<dyn Recorder>, jobs: mpsc::SyncSender<TranscriptionJob>) -> Self {
         Self {
             mode: AppMode::Ready,
             next_id: 1,
@@ -192,6 +183,17 @@ impl App {
                 self.on_transcription_failed(id, message)
             }
             AppEvent::RecordingFailed(message) => self.on_recording_failed(message),
+        }
+    }
+
+    /// Signals an orderly shutdown (decision D5): sets the active
+    /// transcription's cancellation flag so a mid-inference worker aborts
+    /// promptly instead of running to completion. Called by `main` after the
+    /// exit key returns from the event loop; the worker reports its stop by
+    /// exiting its loop when the channels close.
+    pub fn shutdown(&mut self) {
+        if let AppMode::Transcribing(t) = &self.mode {
+            t.cancel.store(true, Ordering::SeqCst);
         }
     }
 
@@ -299,9 +301,10 @@ impl App {
         match phase {
             TranscribingPhase::Running => AppOutcome {
                 view_changed: true,
-                // The text enters the persistent output area; clipboard copy
-                // arrives in slice 5 (architecture section 18).
-                lines: vec![text],
+                // A clearly labeled final transcription enters the persistent
+                // output area (plan step 7, functional spec section 6);
+                // clipboard copy arrives in slice 5 (architecture 18).
+                lines: vec!["Transcription:".to_string(), String::new(), text],
             },
             // Decision R3: a completion received after cancellation was
             // requested is discarded, even if inference finished first. The
@@ -497,7 +500,7 @@ mod tests {
     }
 
     fn harness_with(fake: FakeRecorder) -> Harness {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(1);
         Harness {
             app: App::new(Box::new(fake.clone()), tx),
             fake,
@@ -684,7 +687,7 @@ mod tests {
     #[test]
     fn submission_failure_returns_to_ready() {
         let fake = FakeRecorder::new();
-        let (tx, rx) = mpsc::channel::<TranscriptionJob>();
+        let (tx, rx) = mpsc::sync_channel::<TranscriptionJob>(1);
         drop(rx); // worker unavailable
         let mut app = App::new(Box::new(fake.clone()), tx);
         app.on_command(UserCommand::ToggleRecording);
@@ -734,7 +737,7 @@ mod tests {
     // ---- Transcription outcomes (architecture section 17) ----
 
     #[test]
-    fn completed_during_running_prints_text_and_returns_to_ready() {
+    fn completed_during_running_prints_labeled_text_and_returns_to_ready() {
         let mut h = harness();
         h.app.on_command(UserCommand::ToggleRecording);
         h.app.on_command(UserCommand::ToggleRecording);
@@ -746,7 +749,11 @@ mod tests {
         });
         assert!(outcome.view_changed);
         assert!(matches!(h.app.mode(), AppMode::Ready));
-        assert_eq!(outcome.lines, vec!["hello world"]);
+        assert_eq!(
+            outcome.lines,
+            vec!["Transcription:", "", "hello world"],
+            "the final transcription is clearly labeled (plan step 7)"
+        );
     }
 
     #[test]
@@ -871,6 +878,26 @@ mod tests {
             assert!(outcome.view_changed);
             assert!(matches!(h.app.mode(), AppMode::Ready));
         }
+    }
+
+    #[test]
+    fn shutdown_sets_the_active_cancellation_flag() {
+        let mut h = harness();
+        h.app.on_command(UserCommand::ToggleRecording);
+        h.app.on_command(UserCommand::ToggleRecording);
+        let job = h.rx.recv().unwrap();
+
+        h.app.shutdown();
+        let t = assert_transcribing(h.app.mode(), TranscribingPhase::Running);
+        assert!(
+            t.cancel.load(Ordering::SeqCst),
+            "shutdown must request an in-flight inference to abort"
+        );
+        assert!(job.cancel.load(Ordering::SeqCst));
+        assert!(
+            matches!(h.app.mode(), AppMode::Transcribing(_)),
+            "shutdown does not change the mode; the worker outcome does"
+        );
     }
 
     // ---- Display data (functional spec section 11) ----

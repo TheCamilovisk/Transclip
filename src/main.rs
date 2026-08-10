@@ -18,12 +18,15 @@ use std::sync::mpsc;
 use anyhow::Context;
 use app::{App, AppEvent, TranscriptionJob};
 use recorder::{CpalRecorder, Recorder};
-use transcriber::{Downloader, ModelRelease, ensure_model, load_model, model_cache_dir};
+use transcriber::{
+    Downloader, ModelRelease, WhisperTranscriber, ensure_model, load_model, model_cache_dir,
+    spawn_worker,
+};
 
 /// Provisions and loads the pinned model. Any failure here prevents the
 /// application loop from ever starting (functional spec 15.5, architecture
-/// section 14). The returned context is held alive for the session; slice 5
-/// hands ownership to the long-lived transcription worker (decision D2).
+/// section 14). Slice 4 hands the loaded context to the long-lived
+/// transcription worker, which alone runs inference (decision D2).
 fn startup(
     cache_dir: &Path,
     release: &ModelRelease,
@@ -54,21 +57,33 @@ fn run() -> anyhow::Result<()> {
     }
 
     let cache_dir = model_cache_dir(&transcriber::data_dir()?);
-    let _model = startup(
+    let model = startup(
         &cache_dir,
         &transcriber::BASE_MODEL,
         &transcriber::HttpDownloader,
     )?;
 
-    // Slice 3 wires the recorder boundary to CPAL. The channels are created
-    // here so the controller boundaries stay fixed: `job_tx` feeds the future
-    // worker (slice 4), `event_tx`/`event_rx` carry worker and recorder
-    // outcomes into the loop. The recorder's stream-error sink forwards
-    // `RecordingFailed` onto the event channel from the CPAL callback thread
-    // (architecture section 32: the recorder itself never depends on app
-    // types).
-    let (job_tx, _job_rx) = mpsc::channel::<TranscriptionJob>();
+    // The long-lived transcription worker (architecture sections 13-15,
+    // ADR-09/10; decision D5) starts before any interactive state and reports
+    // startup success/failure through its handshake: the loaded model is
+    // handed to the worker thread, which alone runs inference. The job
+    // channel is bounded to one job so the worker never has a backlog; the
+    // event channel carries exactly one terminal outcome per accepted job.
+    let (job_tx, job_rx) = mpsc::sync_channel::<TranscriptionJob>(1);
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>();
+    let worker = spawn_worker(
+        move || {
+            WhisperTranscriber::new(model)
+                .map(|transcriber| Box::new(transcriber) as Box<dyn transcriber::Transcriber>)
+        },
+        job_rx,
+        event_tx.clone(),
+    )
+    .context("transcription worker failed to start")?;
+
+    // The recorder's stream-error sink forwards `RecordingFailed` onto the
+    // event channel from the CPAL callback thread (architecture section 32:
+    // the recorder itself never depends on app types).
     let recorder: Box<dyn Recorder> = Box::new(CpalRecorder::new({
         let event_tx = event_tx.clone();
         move |message: String| {
@@ -83,6 +98,15 @@ fn run() -> anyhow::Result<()> {
         terminal::TerminalGuard::enter().context("terminal initialization failed")?;
     let result = app::run(&mut app, event_rx, &mut renderer);
     let _ = terminal_guard.restore();
+
+    // Shutdown (decision D5): ask an in-flight inference to abort, then wait
+    // briefly for the worker to stop. Dropping `App` closes the job channel
+    // (it owns the only job sender) and the event receiver is gone with
+    // `run`, so the worker exits its loop; on timeout the process exits and
+    // teardown terminates the worker thread.
+    app.shutdown();
+    drop(app);
+    let _ = worker.join_with_timeout(transcriber::WORKER_JOIN_TIMEOUT);
     result.map_err(Into::into)
 }
 
