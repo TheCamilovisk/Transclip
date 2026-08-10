@@ -55,6 +55,8 @@ It provides:
 - low runtime overhead;
 - interoperability with native speech-to-text libraries.
 
+The initial release targets Linux desktop environments only. Cross-platform support is deferred until Linux behavior is accepted end to end.
+
 ---
 
 ## 3.2 Terminal Interaction
@@ -108,6 +110,8 @@ Responsibilities include:
 - supporting cancellation of active transcription.
 
 Transcription shall execute outside the main terminal event loop.
+
+The initial model is the pinned multilingual Whisper `base` artifact. It is downloaded on first run to the Linux user data directory, verified against a pinned SHA-256 checksum, and subsequently loaded from that local cache. The model artifact URL, version, and checksum are release metadata; failed download, verification, or loading is a startup failure.
 
 ---
 
@@ -220,7 +224,7 @@ enum AppMode {
 }
 ```
 
-Additional internal data may be associated with individual states if needed, but the externally visible states remain these three.
+Additional internal data may be associated with individual states if needed, but the externally visible states remain these three. In particular, `Transcribing` shall retain an internal phase of `Running` or `Cancelling`, the active `TranscriptionId`, and its cancellation flag.
 
 The valid transitions are:
 
@@ -230,14 +234,16 @@ Ready
   │ Ctrl+R
   ▼
 Recording
-  │
-  ├── Esc ─────────────────────► Ready
-  │
-  │ Ctrl+R
-  ▼
+   │
+   ├── Esc ─────────────────────► Ready
+   │
+   │ Ctrl+R
+   ▼
 Transcribing
-  │
-  ├── Esc ─────────────────────► Ready
+   │
+   ├── Esc ─────────────────────► Transcribing (Cancelling)
+   │                                │
+   │                                └── worker stopped ──► Ready
   │
   ├── transcription failure ───► Ready
   │
@@ -283,14 +289,14 @@ Suggested representation:
 
 ```rust
 enum AppEvent {
-    TranscriptionCompleted(String),
-    TranscriptionCancelled,
-    TranscriptionFailed(String),
+    TranscriptionCompleted { id: TranscriptionId, text: String },
+    TranscriptionCancelled { id: TranscriptionId },
+    TranscriptionFailed { id: TranscriptionId, message: String },
     RecordingFailed(String),
 }
 ```
 
-Additional events may be introduced if required during implementation.
+Each transcription event must include its operation ID. This makes late worker events harmless after cancellation or recovery.
 
 Internal events are sent back to the application loop through a channel.
 
@@ -349,12 +355,12 @@ The initial threading model shall remain small.
 │ Clipboard operations    │
 └────────────┬────────────┘
              │
-             │ start transcription
+              │ submit transcription job
              ▼
 ┌─────────────────────────┐
 │ Transcription Worker    │
 │                         │
-│ whisper-rs              │
+│ owns loaded whisper-rs  │
 │ Whisper inference       │
 └────────────┬────────────┘
              │
@@ -509,7 +515,9 @@ Preferred lifecycle:
 ```text
 Application startup
        ↓
-Load Whisper model
+Provision and verify model if missing
+       ↓
+Start model-owning worker
        ↓
 Ready
        ↓
@@ -532,6 +540,8 @@ Failure to initialize the transcription model is considered a startup failure be
 
 # 15. Transcription Worker Lifecycle
 
+The application starts one long-lived transcription worker during startup. The worker owns the loaded Whisper model and accepts at most one job at a time. This avoids requiring the model or its native resources to be shared across arbitrary worker threads.
+
 After recording finishes:
 
 ```text
@@ -545,10 +555,10 @@ stop recorder
 RecordedAudio
    │
    ▼
-set mode = Transcribing
+set mode = Transcribing (Running)
    │
    ▼
-spawn worker
+submit job to worker
    │
    ▼
 Whisper inference
@@ -614,6 +624,8 @@ Cancellation should terminate computation when the underlying transcription libr
 
 The architecture shall not rely solely on ignoring a completed result after cancellation if actual cooperative cancellation is available.
 
+On `Esc`, the controller sets the cancellation flag and changes the internal phase to `Cancelling`. It shall render a cancellation status and reject recording commands until it receives the matching worker event. Only then may it transition to `Ready` and accept another transcription job.
+
 ---
 
 # 17. Race Conditions Around Cancellation
@@ -625,11 +637,11 @@ The application controller shall resolve this through application state.
 For example:
 
 1. user presses `Esc`;
-2. application transitions from `Transcribing` to `Ready`;
+2. application changes `Transcribing` from `Running` to `Cancelling`;
 3. cancellation flag is set;
-4. a late `TranscriptionCompleted` event arrives.
+4. a completion event arrives before the worker observes cancellation.
 
-Because the transcription operation is no longer active, the stale event shall be ignored.
+The controller shall discard a completion event received while the matching operation is cancelling, then return to `Ready` only after the worker has stopped the job.
 
 To make this reliable, transcription operations may be assigned an identifier.
 
@@ -648,7 +660,7 @@ AppEvent::TranscriptionCompleted {
 }
 ```
 
-The application accepts the result only when the identifier corresponds to the currently active transcription.
+The application accepts a result only when the identifier corresponds to the currently running transcription. Results for cancelled, completed, or otherwise inactive operations are discarded.
 
 This mechanism is recommended if implementation testing reveals completion/cancellation races.
 
@@ -917,6 +929,7 @@ Some failures prevent the application from functioning at all and should cause s
 
 Examples include:
 
+- Whisper model download or integrity verification fails;
 - Whisper model cannot be loaded;
 - required terminal initialization fails;
 - unsupported runtime environment.
@@ -941,10 +954,13 @@ Shutdown responsibilities include:
 
 1. stop active recording;
 2. request active transcription cancellation;
-3. release audio resources;
-4. restore terminal state;
-5. release transcription model resources;
-6. exit the process.
+3. wait for the worker to release the active job when practical;
+4. release audio resources;
+5. restore terminal state;
+6. release transcription model resources;
+7. exit the process.
+
+`Ctrl+C` shall initiate this normal shutdown path.
 
 ---
 
@@ -975,7 +991,7 @@ Responsible for:
 
 - application startup;
 - dependency initialization;
-- Whisper model loading;
+  - model provisioning and transcription-worker startup;
 - terminal initialization;
 - channel creation;
 - starting the application loop;
@@ -1212,7 +1228,7 @@ AppMode::Transcribing
   ↓
 render Transcribing
   ↓
-start transcription worker
+submit transcription job to worker
 ```
 
 ---
@@ -1280,7 +1296,7 @@ mode = Ready
 render Ready
 ```
 
-The transcription worker then terminates cooperatively.
+The transcription worker cancels the active job cooperatively and remains available for the next job.
 
 Any result belonging to the cancelled operation shall be discarded.
 
@@ -1329,21 +1345,19 @@ The initial application shall not require:
 - cache;
 - server-side persistence.
 
-The Whisper model itself exists as a local model asset but is not application-generated persistent data.
+The verified Whisper model is a local cached dependency, not application-generated data. It is stored in the Linux user data directory and may be deleted to force a verified re-download.
 
 ---
 
 # 42. Configuration
 
-Configuration should remain minimal.
+Configuration should remain minimal. The initial model location, artifact version, source URL, and checksum are application release metadata, rather than user configuration. On first run, the application downloads the pinned multilingual `base` model into the Linux user data directory and verifies it before use.
 
-Potential initial configuration includes:
+Other parameters use sensible defaults initially where practical:
 
-```text
-Whisper model path
-```
-
-Other parameters should use sensible defaults initially where practical.
+- the default input microphone;
+- automatic language detection;
+- mono floating-point audio normalized to Whisper's required sample rate.
 
 Potential future settings include:
 
@@ -1354,7 +1368,7 @@ Potential future settings include:
 
 These should not drive premature configuration architecture.
 
-A small command-line argument or environment variable is sufficient for the first implementation.
+No model-path command-line argument or environment variable is required for the first implementation.
 
 ---
 
@@ -1507,6 +1521,8 @@ The initial architecture does not require sending:
 
 to remote services.
 
+First-run model provisioning downloads only the pinned model artifact and its required integrity metadata. It does not transmit user audio, transcription text, or clipboard contents.
+
 Microphone capture occurs only while the application is in `Recording` mode.
 
 Recorded audio should be discarded after:
@@ -1521,7 +1537,7 @@ No transcription history is persisted by the application.
 
 # 50. Cross-Platform Considerations
 
-The chosen libraries support multiple desktop platforms, but operating-system behavior may differ for:
+The initial release supports Linux desktop environments only. Linux behavior may still differ for:
 
 - microphone device enumeration;
 - audio formats;
@@ -1529,7 +1545,7 @@ The chosen libraries support multiple desktop platforms, but operating-system be
 - terminal capabilities;
 - key event representation.
 
-Platform-specific handling shall remain confined to infrastructure components whenever possible.
+X11 and Wayland clipboard operation require manual acceptance testing. Platform-specific handling shall remain confined to infrastructure components whenever possible.
 
 The state machine and core application behavior should remain platform-independent.
 
@@ -1606,6 +1622,30 @@ The state machine and core application behavior should remain platform-independe
 **Decision:** Load the speech model once and reuse it for the application session.
 
 **Reason:** Repeated model initialization would unnecessarily increase transcription-cycle latency.
+
+---
+
+## ADR-10 — Single Model-Owning Worker
+
+**Decision:** Use one long-lived worker that owns the loaded Whisper model and processes one transcription at a time.
+
+**Reason:** It avoids unsafe or unsupported sharing of native Whisper resources and prevents overlapping inference jobs.
+
+---
+
+## ADR-11 — Cancellation Waits for Worker Release
+
+**Decision:** Keep the application in the `Transcribing` cancellation phase until the active worker reports completion, cancellation, or failure.
+
+**Reason:** A new job must not start while cancellation may still be using the single model owner.
+
+---
+
+## ADR-12 — Verified First-Run Model Download
+
+**Decision:** Download a pinned multilingual Whisper `base` model on first run, cache it in the Linux user data directory, and verify it with a pinned SHA-256 checksum.
+
+**Reason:** This provides a usable default without bundling a large asset or requiring users to locate a model manually.
 
 ---
 
@@ -1688,7 +1728,7 @@ Recording ── Esc ──► Ready
 and:
 
 ```text
-Transcribing ── Esc ──► Ready
+Transcribing ── Esc ──► Transcribing (Cancelling) ── worker stopped ──► Ready
 ```
 
 This boundary should remain stable unless new product requirements create a concrete need for additional architectural components.

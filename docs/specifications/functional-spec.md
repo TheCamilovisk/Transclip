@@ -13,6 +13,8 @@ The application is a terminal-based voice transcription utility that allows the 
 
 The application is intended to remain active in the terminal and wait for repeated recording commands.
 
+The initial release supports Linux desktop environments only. Voice recognition executes locally after the required Whisper model has been provisioned.
+
 ---
 
 ## 2. Scope
@@ -30,6 +32,8 @@ The application shall support:
 - terminal status feedback;
 - clipboard integration;
 - repeated recording/transcription cycles within the same application session.
+
+The application shall download and verify its required Whisper model before its first usable session when the model is not already present locally.
 
 ### 2.2 Out of Scope
 
@@ -154,6 +158,8 @@ Esc     Cancel
 
 Transcription must execute without preventing the application from processing keyboard input.
 
+After cancellation is requested, the terminal shall show that cancellation is in progress until the transcription worker confirms it has stopped. The application remains in **Transcribing** mode during this internal cancellation phase and shall not accept a new recording command. This prevents concurrent use of the local transcription model.
+
 ### Available Commands
 
 #### `Esc`
@@ -164,7 +170,9 @@ The application shall:
 
 1. request cancellation of the transcription operation;
 2. discard any incomplete transcription result;
-3. return to **Ready to Record** mode.
+3. display that cancellation is in progress;
+4. wait for the transcription worker to stop and release its resources;
+5. return to **Ready to Record** mode.
 
 No incomplete text shall be printed or copied to the clipboard.
 
@@ -264,7 +272,8 @@ The transcription shall remain visible in the terminal output after the applicat
 2. Application requests transcription cancellation.
 3. Application stops or abandons the transcription operation.
 4. Application discards incomplete transcription output.
-5. Application returns to **Ready to Record** mode.
+5. Application displays cancellation progress until the worker stops.
+6. Application returns to **Ready to Record** mode.
 
 ### Postconditions
 
@@ -492,6 +501,12 @@ A clipboard failure shall not invalidate a successful transcription.
 
 ---
 
+## 15.5 Model Provisioning or Initialization Error
+
+If the required local Whisper model is missing, the application shall download its pinned model artifact before entering **Ready to Record**. The download shall be integrity-verified. If downloading, verification, or loading the model fails, the application shall display a clear startup error and exit without enabling recording.
+
+---
+
 # 16. Application State Model
 
 The normal state transitions are:
@@ -529,8 +544,14 @@ Transcribing
   |
   | Esc
   v
+Cancelling transcription
+  |
+  | worker stopped
+  v
 Ready
 ```
+
+`Cancelling transcription` is an internal phase of **Transcribing**, not a fourth public application mode.
 
 Error recovery:
 
@@ -561,7 +582,8 @@ Ready
 | Recording     | `Ctrl+R`               | Stop recording and start transcription | Transcribing |
 | Recording     | `Esc`                  | Cancel and discard recording           | Ready        |
 | Recording     | Recording failure      | Display error                          | Ready        |
-| Transcribing  | `Esc`                  | Cancel transcription                   | Ready        |
+| Transcribing  | `Esc`                  | Request cancellation; await worker stop | Transcribing |
+| Transcribing (cancelling) | Worker stopped | Discard result and display ready | Ready |
 | Transcribing  | Transcription succeeds | Print and copy text                    | Ready        |
 | Transcribing  | Transcription fails    | Display error                          | Ready        |
 
@@ -603,7 +625,7 @@ The user shall not need to restart the application between recordings.
 
 The initial version shall be considered functionally complete when all of the following behaviors work:
 
-1. Starting the application displays **Ready to Record**.
+1. Starting the application provisions and verifies the local Whisper model when necessary, then displays **Ready to Record**.
 
 2. Pressing `Ctrl+R` while ready starts microphone recording.
 
@@ -617,7 +639,7 @@ The initial version shall be considered functionally complete when all of the fo
 
 7. The terminal remains responsive while transcription is running.
 
-8. Pressing `Esc` while transcribing cancels the transcription and returns to ready mode.
+8. Pressing `Esc` while transcribing displays cancellation progress, discards the result, and returns to ready mode only after the worker stops.
 
 9. Successful transcription is printed in the terminal.
 
