@@ -143,6 +143,7 @@ Startup failure (model provisioning/load or terminal init) prints a clear
 | 10 | Focus behavior | Terminal emulator | `Ctrl+R`/`Esc` work only while the terminal is focused; typing in another window never triggers Transclip (no global interception). |
 | 11 | X11 and Wayland | One X11 session and one Wayland session | Clipboard behavior validated on both session types (X11 through arboard/x11rb; Wayland through `wl-clipboard-rs`). |
 | 12 | Ctrl+C / error exit | Any state (Ready, Recording, Transcribing) | Recorder/worker cleanup follows the bounded shutdown policy; terminal restored (cursor shown, raw mode off); exit code 0. |
+| 13 | Automatic language detection | Working microphone; display session; a Portuguese utterance and a later utterance in another supported language | Each final result remains in its spoken language rather than being translated to English. Portuguese output is readable Portuguese; the second recording is detected independently without restarting or reloading the model. |
 
 ## Record-keeping
 
