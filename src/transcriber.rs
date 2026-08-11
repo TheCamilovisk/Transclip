@@ -313,14 +313,10 @@ impl Transcriber for WhisperTranscriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        // Language: whisper.cpp's default language is "en"
-        // (whisper_full_default_params, whisper.cpp 1.8.3 — decision D5).
-        // `set_detect_language(true)` is deliberately NOT used: empirically it
-        // returns zero segments on the pinned multilingual base model in this
-        // build (verified 2026-08-10 against jfk.wav: greedy and beam both
-        // yield segments=0 with detection on, while the default language
-        // yields the expected transcript), so detection would make every real
-        // transcription empty (functional spec 19.9).
+        // `set_detect_language(true)` only reports the detected language and
+        // returns before decoding. A null language instead detects and then
+        // transcribes each recording (whisper-rs 0.16 / whisper.cpp 1.8.3).
+        params.set_language(None);
         // Cooperative cancellation (decision D2): whisper.cpp polls this
         // callback between encode/decode passes; on true it aborts and
         // returns an error code (verified in the vendored whisper.cpp 1.8.3).
