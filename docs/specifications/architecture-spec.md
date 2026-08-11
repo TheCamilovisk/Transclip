@@ -106,7 +106,7 @@ Responsibilities include:
 - accepting recorded audio samples;
 - converting them into the format required by Whisper;
 - executing transcription;
-- returning final plain-text transcription;
+- returning final whitespace-normalized plain-text transcription without decoder-segment line breaks;
 - supporting cancellation of active transcription.
 
 Transcription shall execute outside the main terminal event loop.
@@ -767,6 +767,10 @@ struct AppView {
 
 The renderer shall not own business behavior.
 
+The renderer receives logical text, not terminal-specific payload bytes. It shall serialize every logical newline written to the terminal as carriage return plus line feed (`\r\n`), including newlines embedded in status blocks or output text. Raw terminal mode can disable the terminal's normal line-feed-to-carriage-return-plus-line-feed processing, so the renderer shall not depend on that processing to return the cursor to column zero.
+
+This serialization belongs exclusively to terminal presentation. The controller, transcriber, and clipboard boundary exchange canonical transcription text without terminal line-ending conversion.
+
 ---
 
 # 22. Rendering by State
@@ -820,6 +824,8 @@ Esc Cancel
 ```
 
 The implementation may accomplish this through simple line rendering rather than a full terminal-widget framework.
+
+Append-only rendering shall preserve left-aligned logical lines across status changes and transcript output. The renderer must apply the terminal newline contract to both status blocks and persistent output, including a transcript containing embedded logical newlines.
 
 ---
 

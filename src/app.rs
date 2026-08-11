@@ -900,6 +900,36 @@ mod tests {
     }
 
     #[test]
+    fn canonical_transcript_reaches_clipboard_without_terminal_serialization() {
+        let mut h = harness();
+        let id = start_transcribing(&mut h);
+        // A canonical transcript as produced by the slice-8 normalization
+        // step: single-space-joined prose with no decoder-segment line breaks.
+        let canonical = "Hello there. This is a test. Goodbye!".to_string();
+
+        let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
+            id,
+            text: canonical.clone(),
+        });
+        assert_eq!(outcome.lines[2], canonical);
+        assert_eq!(
+            h.clipboard.calls(),
+            vec![ClipboardCall {
+                text: canonical.clone()
+            }],
+            "the clipboard payload is the canonical transcript, byte-for-byte"
+        );
+        assert!(
+            !h.clipboard.calls()[0].text.contains('\r'),
+            "terminal CRLF serialization must never reach the clipboard payload"
+        );
+        assert!(
+            !h.clipboard.calls()[0].text.contains('\n'),
+            "no decoder-segment line breaks in the canonical transcript"
+        );
+    }
+
+    #[test]
     fn clipboard_failure_keeps_transcription_and_warns() {
         let mut h = harness_with_clipboard(
             FakeRecorder::new(),

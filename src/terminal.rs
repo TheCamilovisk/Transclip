@@ -96,17 +96,47 @@ pub struct TerminalRenderer;
 
 impl Renderer for TerminalRenderer {
     fn render(&mut self, status_block: Option<&str>, lines: &[String]) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        if let Some(block) = status_block {
-            stdout.write_all(block.as_bytes())?;
-        }
-        for line in lines {
-            stdout.write_all(line.as_bytes())?;
-            stdout.write_all(b"\n")?;
-        }
-        stdout.flush()?;
-        Ok(())
+        render_to(&mut io::stdout(), status_block, lines)
     }
+}
+
+/// Writes `text` to `writer` with every logical line feed serialized as `\r\n`
+/// (architecture section 21). Raw mode disables the terminal's output
+/// post-processing — crossterm's `cfmakeraw` clears `OPOST` (decision D6) —
+/// so a bare `\n` would move the cursor down without returning it to column
+/// zero; the renderer must emit the carriage return itself. A `\n` already
+/// preceded by `\r` is left untouched so an existing `\r\n` is never doubled.
+fn write_crlf(writer: &mut impl Write, text: &str) -> io::Result<()> {
+    let bytes = text.as_bytes();
+    let mut chunk_start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r') {
+            writer.write_all(&bytes[chunk_start..index])?;
+            writer.write_all(b"\r\n")?;
+            chunk_start = index + 1;
+        }
+    }
+    writer.write_all(&bytes[chunk_start..])
+}
+
+/// Serializes one render request into `writer` (append-only, decision D6):
+/// the status block and every output line are written through `write_crlf`,
+/// and the renderer-appended line terminator uses the same `\r\n` convention
+/// (architecture section 21).
+fn render_to(
+    writer: &mut impl Write,
+    status_block: Option<&str>,
+    lines: &[String],
+) -> io::Result<()> {
+    if let Some(block) = status_block {
+        write_crlf(writer, block)?;
+    }
+    for line in lines {
+        write_crlf(writer, line)?;
+        writer.write_all(b"\r\n")?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 /// True when at least one terminal event is available within `timeout`.
@@ -234,6 +264,57 @@ mod tests {
         let mut guard = TerminalGuard::for_test(false);
         assert!(guard.restore().is_ok());
         assert!(guard.restore().is_ok());
+    }
+
+    #[test]
+    fn write_crlf_serializes_every_logical_line_feed() {
+        let mut out = Vec::new();
+        // A multiline status block with embedded blank lines and a trailing
+        // terminator (architecture section 22/23).
+        write_crlf(&mut out, "Ready to record\n\nCtrl+R  Start recording\n").unwrap();
+        assert_eq!(out, b"Ready to record\r\n\r\nCtrl+R  Start recording\r\n");
+        assert!(
+            out.windows(2).all(|w| !(w[1] == b'\n' && w[0] != b'\r')),
+            "no bare line feed bytes: every \\n must be preceded by \\r"
+        );
+    }
+
+    #[test]
+    fn write_crlf_preserves_existing_carriage_returns() {
+        // An existing `\r\n` is not doubled; a bare `\n` after it is still
+        // serialized.
+        let mut out = Vec::new();
+        write_crlf(&mut out, "a\r\nb\n").unwrap();
+        assert_eq!(out, b"a\r\nb\r\n");
+    }
+
+    #[test]
+    fn render_to_uses_crlf_for_status_and_appended_terminators() {
+        let mut out = Vec::new();
+        render_to(
+            &mut out,
+            Some("Transcribing...\n\nEsc     Cancel\n"),
+            &[
+                "Transcription:".to_string(),
+                String::new(),
+                // A persistent output item with an embedded logical newline:
+                // every line ending, including the renderer-appended
+                // terminator, must be `\r\n`.
+                "first\nsecond line".to_string(),
+            ],
+        )
+        .unwrap();
+        let expected = concat!(
+            "Transcribing...\r\n\r\nEsc     Cancel\r\n",
+            "Transcription:\r\n",
+            "\r\n",
+            "first\r\nsecond line\r\n",
+        );
+        assert_eq!(out, expected.as_bytes());
+        assert!(
+            out.windows(2).all(|w| !(w[1] == b'\n' && w[0] != b'\r')),
+            "no bare line feed bytes anywhere in the render stream"
+        );
     }
 
     #[test]

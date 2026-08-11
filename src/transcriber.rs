@@ -259,6 +259,20 @@ pub trait Transcriber: Send {
     ) -> Result<String, String>;
 }
 
+/// Joins decoded whisper segments into one canonical plain-text flow
+/// (functional spec 6, 13; architecture section 3.4). Each segment's text is
+/// split on whitespace into nonempty tokens — trimming segment-boundary
+/// whitespace and discarding empty segments — and all tokens are joined with
+/// a single ASCII space. Decoder/timestamp segment boundaries never become
+/// user-visible line breaks, and no character-count wrapping is added.
+fn normalize_segments<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
+    let mut tokens: Vec<&'a str> = Vec::new();
+    for segment in segments {
+        tokens.extend(segment.split_whitespace());
+    }
+    tokens.join(" ")
+}
+
 /// Whisper-backed transcriber owning the loaded model and one reusable
 /// decoding state (architecture section 14, ADR-09/10). The state holds the
 /// model alive internally (`WhisperState` keeps an `Arc` clone of the
@@ -321,18 +335,22 @@ impl Transcriber for WhisperTranscriber {
             .full(params, &audio.samples)
             .map_err(|e| e.to_string())?;
 
-        // Final plain text only; partial output is never surfaced. Segments
-        // are joined with newlines and trimmed so the transcript reads
-        // naturally in the terminal.
-        let mut text = String::new();
+        // Final canonical plain text only (functional spec 6, 13; architecture
+        // section 3.4): decoded segments are whitespace-normalized and joined
+        // with one space, so decoder/timestamp boundaries never surface as
+        // line breaks and partial output is never surfaced.
+        let mut segments: Vec<String> = Vec::new();
         for i in 0..self.state.full_n_segments() {
             if let Some(segment) = self.state.get_segment(i) {
-                let segment = segment.to_str_lossy().map_err(|e| e.to_string())?;
-                text.push_str(segment.trim());
-                text.push('\n');
+                segments.push(
+                    segment
+                        .to_str_lossy()
+                        .map_err(|e| e.to_string())?
+                        .into_owned(),
+                );
             }
         }
-        Ok(text.trim_end().to_string())
+        Ok(normalize_segments(segments.iter().map(String::as_str)))
     }
 }
 
@@ -1073,5 +1091,42 @@ mod tests {
                 if message == "worker exited before reporting startup"
         ));
         drop(job_tx);
+    }
+
+    // ---- Transcript normalization (slice 8) ----
+
+    #[test]
+    fn normalization_trims_segment_whitespace_and_discards_empty_segments() {
+        assert_eq!(
+            normalize_segments(["  hello ", "world\t \t", "", "  !  "]),
+            "hello world !"
+        );
+    }
+
+    #[test]
+    fn normalization_collapses_whitespace_within_and_across_segments() {
+        assert_eq!(
+            normalize_segments(["a   b", " c\n\n d ", "  e "]),
+            "a b c d e"
+        );
+    }
+
+    #[test]
+    fn normalization_joins_multiple_segments_without_segment_newlines() {
+        // Whisper returning several segments must produce one prose flow:
+        // no line break appears merely because of the segment boundary, and
+        // ordinary punctuation is preserved as text (functional spec 13).
+        let joined = normalize_segments(["Hello there.", "This is a test.", "Goodbye!"]);
+        assert_eq!(joined, "Hello there. This is a test. Goodbye!");
+        assert!(!joined.contains('\n'), "no segment-boundary line breaks");
+        assert!(
+            !joined.contains('\r'),
+            "no terminal serialization in canonical text"
+        );
+    }
+
+    #[test]
+    fn normalization_of_only_empty_segments_is_empty() {
+        assert_eq!(normalize_segments(["  ", "", "\t\n "]), "");
     }
 }
