@@ -193,15 +193,22 @@ impl App {
         }
     }
 
-    /// Signals an orderly shutdown (decision D5): sets the active
-    /// transcription's cancellation flag so a mid-inference worker aborts
-    /// promptly instead of running to completion. Called by `main` after the
-    /// exit key returns from the event loop; the worker reports its stop by
-    /// exiting its loop when the channels close.
+    /// Signals an orderly shutdown (architecture section 29, decision D5):
+    /// requests an in-flight transcription to abort by setting its shared
+    /// cancellation flag and stops an active recording, discarding its
+    /// captured audio. Called by `main` after the exit key returns from the
+    /// event loop. The mode itself is left untouched — dropping `App` after
+    /// shutdown releases the recorder stream and the job channel, and the
+    /// worker reports its stop by exiting its loop when the channels close.
     pub fn shutdown(&mut self) {
         if let AppMode::Transcribing(t) = &self.mode {
             t.cancel.store(true, Ordering::SeqCst);
         }
+        // Ctrl+C during Recording must not leave the microphone stream or
+        // the captured buffer alive past the exit path (plan step 3).
+        // `cancel` is idempotent, so this is safe even when the recorder is
+        // already idle (Ready, Transcribing, or after a prior cleanup).
+        self.recorder.cancel();
     }
 
     fn class(&self) -> ModeClass {
@@ -1156,6 +1163,31 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_stops_an_active_recording() {
+        let mut h = harness();
+        h.app.on_command(UserCommand::ToggleRecording);
+        assert!(matches!(h.app.mode(), AppMode::Recording));
+
+        // Ctrl+C during Recording: the exit path releases the recorder
+        // (stream + captured buffer) and submits nothing (plan step 3,
+        // architecture section 29 step 1).
+        h.app.shutdown();
+        assert_eq!(
+            h.fake.calls(),
+            vec![RecorderCall::Start, RecorderCall::Cancel],
+            "an active recording must be stopped on shutdown"
+        );
+        assert!(
+            h.rx.try_recv().is_err(),
+            "shutdown never submits a transcription job"
+        );
+        assert!(
+            h.clipboard.calls().is_empty(),
+            "shutdown never copies (functional spec 14)"
+        );
+    }
+
+    #[test]
     fn shutdown_sets_the_active_cancellation_flag() {
         let mut h = harness();
         h.app.on_command(UserCommand::ToggleRecording);
@@ -1172,6 +1204,105 @@ mod tests {
         assert!(
             matches!(h.app.mode(), AppMode::Transcribing(_)),
             "shutdown does not change the mode; the worker outcome does"
+        );
+    }
+
+    // ---- Repeated mixed cycles (plan step 5) ----
+
+    #[test]
+    fn repeated_mixed_cycles_never_leak_output_or_clipboard() {
+        // success -> cancel recording -> success -> cancel transcription ->
+        // recoverable failure -> success (plan step 5). Every cycle starts
+        // from a clean Ready, ids stay monotonic, and only successful
+        // completions produce output lines and clipboard copies — cancelled
+        // and failed cycles must not leak text (functional spec 14).
+        let mut h = harness();
+
+        // Cycle 1: success.
+        let id1 = start_transcribing(&mut h);
+        let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
+            id: id1,
+            text: "one".to_string(),
+        });
+        assert_eq!(
+            outcome.lines,
+            vec!["Transcription:", "", "one", "Copied to clipboard."]
+        );
+        assert!(matches!(h.app.mode(), AppMode::Ready));
+
+        // Cycle 2: cancel recording — no job, no output.
+        h.app.on_command(UserCommand::ToggleRecording);
+        let outcome = h.app.on_command(UserCommand::Cancel);
+        assert!(outcome.lines.is_empty());
+        assert!(matches!(h.app.mode(), AppMode::Ready));
+        assert!(
+            h.rx.try_recv().is_err(),
+            "a cancelled recording never submits a job"
+        );
+
+        // Cycle 3: success.
+        let id3 = start_transcribing(&mut h);
+        let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
+            id: id3,
+            text: "three".to_string(),
+        });
+        assert_eq!(outcome.lines[2], "three");
+
+        // Cycle 4: cancel transcription — ready only after the worker
+        // acknowledgement, and nothing is printed for the cancelled cycle.
+        let id4 = start_transcribing(&mut h);
+        h.app.on_command(UserCommand::Cancel);
+        assert!(matches!(
+            h.app.mode(),
+            AppMode::Transcribing(Transcribing {
+                phase: TranscribingPhase::Cancelling,
+                ..
+            })
+        ));
+        let outcome = h.app.on_event(AppEvent::TranscriptionCancelled { id: id4 });
+        assert!(outcome.lines.is_empty());
+        assert!(matches!(h.app.mode(), AppMode::Ready));
+
+        // Cycle 5: recoverable transcription failure — error line, no copy.
+        let id5 = start_transcribing(&mut h);
+        let outcome = h.app.on_event(AppEvent::TranscriptionFailed {
+            id: id5,
+            message: "no speech detected".to_string(),
+        });
+        assert_eq!(
+            outcome.lines,
+            vec!["Error: transcription failed: no speech detected"]
+        );
+        assert!(matches!(h.app.mode(), AppMode::Ready));
+
+        // Cycle 6: success.
+        let id6 = start_transcribing(&mut h);
+        assert_eq!(
+            id6,
+            TranscriptionId::new(5),
+            "ids stay monotonic across the mixed cycles"
+        );
+        let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
+            id: id6,
+            text: "six".to_string(),
+        });
+        assert_eq!(outcome.lines[2], "six");
+        assert!(matches!(h.app.mode(), AppMode::Ready));
+
+        assert_eq!(
+            h.clipboard.calls(),
+            vec![
+                ClipboardCall {
+                    text: "one".to_string()
+                },
+                ClipboardCall {
+                    text: "three".to_string()
+                },
+                ClipboardCall {
+                    text: "six".to_string()
+                },
+            ],
+            "only the successful cycles copy, in order — no leakage across operations"
         );
     }
 
