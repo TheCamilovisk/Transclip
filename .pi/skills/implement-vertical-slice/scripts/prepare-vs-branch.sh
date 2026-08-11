@@ -96,7 +96,7 @@ if [[ -z "$kebab" ]]; then
   echo "error: could not derive a kebab-case title from: $title" >&2
   exit 1
 fi
-branch="vs-$(printf '%03d' "$vs")_$kebab"
+branch="vs-$(printf '%03d' "$((10#$vs))")_$kebab"
 echo "issue title: $title"
 echo "branch name: $branch"
 

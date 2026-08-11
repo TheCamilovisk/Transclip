@@ -29,6 +29,7 @@ The release workflow is `Ctrl+R` to record, `Ctrl+R` to submit the completed rec
 | 5 | `06-clipboard-completion.md` | Clipboard copy and non-fatal clipboard failures | Slice 4 |
 | 6 | `07-transcription-cancellation.md` | Correct worker cancellation and cancellation-race handling | Slices 4-5, D2 |
 | 7 | `08-operational-hardening.md` | Runtime recovery, shutdown, and end-to-end acceptance validation | Slices 1-6, D5-D6 |
+| 8 | `09-transcript-normalization-and-terminal-line-endings.md` | Canonical transcript text and raw-mode-safe terminal line rendering | Slice 7, D6 |
 
 ## Shared Contracts
 
@@ -55,4 +56,4 @@ Exact ownership and error types can vary, but every terminal worker outcome must
 - State-machine tests run with no microphone, clipboard, Whisper model, or interactive terminal.
 - No user audio, transcription, or clipboard content is sent over the network. Network access is confined to first-run model provisioning.
 - Manual Linux acceptance confirms microphone capture, focused terminal input, local Whisper inference, cancellation responsiveness, X11 and Wayland clipboard behavior, and terminal restoration.
-- The full functional acceptance list in functional specification section 19 is traceably covered by slices 1-7.
+- The full functional acceptance list in functional specification section 19 is traceably covered by slices 1-8.

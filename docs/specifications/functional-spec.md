@@ -182,7 +182,7 @@ No incomplete text shall be printed or copied to the clipboard.
 
 When transcription completes successfully, the application shall:
 
-1. retrieve the complete transcription text;
+1. retrieve and normalize the complete transcription text;
 2. print the text in the terminal;
 3. copy the complete text to the system clipboard;
 4. indicate that the text was copied successfully;
@@ -203,6 +203,8 @@ Ctrl+R  Start recording
 ```
 
 The transcription shall remain visible in the terminal output after the application returns to the ready state.
+
+The successful transcription is canonical plain text. Decoder or timestamp segment boundaries shall not become user-visible line breaks. The application shall trim segment-boundary whitespace, discard empty segments, and join the remaining text with a single space. This canonical text is the text printed as the result and the exact text copied to the clipboard.
 
 ---
 
@@ -365,6 +367,8 @@ At minimum, the application shall display a distinct indication for:
 
 The terminal shall also display the keyboard commands available in the current mode.
 
+Every displayed logical line, including status text, blank lines, and transcription output, shall begin at the terminal's left margin. Enabling per-key terminal input mode shall not cause a later line to retain the preceding line's cursor column. Terminal line-ending serialization is presentation-only and shall not change the canonical transcription text.
+
 Example:
 
 ```text
@@ -408,6 +412,8 @@ The transcription component shall receive audio captured during the current reco
 
 It shall produce plain text representing the recognized speech.
 
+When the recognition engine returns text in multiple decoder or timestamp segments, those boundaries are internal implementation details. The final plain text shall be whitespace-normalized by trimming segment-boundary whitespace, discarding empty segments, and separating the remaining text with one space. The application shall not add line breaks or wrapping at decoder segment boundaries.
+
 The first version requires only a final transcription.
 
 The following are not required:
@@ -425,7 +431,7 @@ The following are not required:
 After a successful transcription:
 
 - the complete transcription shall be copied to the system clipboard;
-- clipboard content shall match the text printed as the successful transcription result.
+- clipboard content shall exactly match the canonical transcription text printed as the successful transcription result; terminal-only line-ending serialization shall not affect clipboard content.
 
 Clipboard operations shall not occur when:
 
@@ -658,6 +664,8 @@ The initial version shall be considered functionally complete when all of the fo
 16. Recoverable recording or transcription failures return the application to ready mode.
 
 17. Clipboard failure does not discard an otherwise successful transcription.
+
+18. Multisegment transcription is displayed as normalized plain text without decoder-segment line breaks, copied unchanged to the clipboard, and every terminal output line remains left-aligned while per-key terminal input mode is active.
 
 ---
 
