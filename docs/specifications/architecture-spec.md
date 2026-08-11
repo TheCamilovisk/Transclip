@@ -105,6 +105,7 @@ Responsibilities include:
 
 - accepting recorded audio samples;
 - converting them into the format required by Whisper;
+- automatically detecting the source language for each completed recording and transcribing in that language;
 - executing transcription;
 - returning final whitespace-normalized plain-text transcription without decoder-segment line breaks;
 - supporting cancellation of active transcription.
@@ -112,6 +113,8 @@ Responsibilities include:
 Transcription shall execute outside the main terminal event loop.
 
 The initial model is the pinned multilingual Whisper `base` artifact. It is downloaded on first run to the Linux user data directory, verified against a pinned SHA-256 checksum, and subsequently loaded from that local cache. The model artifact URL, version, and checksum are release metadata; failed download, verification, or loading is a startup failure.
+
+Language detection is part of each inference request. It does not persist a selected language between jobs, expose a user setting, or request Whisper's English-only translation mode.
 
 ---
 
@@ -484,6 +487,7 @@ The transcriber component is responsible for:
 
 - owning or accessing the loaded Whisper model;
 - accepting normalized recorded audio;
+- configuring automatic source-language detection for that recording;
 - running transcription;
 - returning final text;
 - responding to cancellation requests.
@@ -1368,7 +1372,6 @@ Other parameters use sensible defaults initially where practical:
 Potential future settings include:
 
 - microphone device;
-- transcription language;
 - model selection;
 - keyboard shortcuts.
 
@@ -1652,6 +1655,14 @@ The state machine and core application behavior should remain platform-independe
 **Decision:** Download a pinned multilingual Whisper `base` model on first run, cache it in the Linux user data directory, and verify it with a pinned SHA-256 checksum.
 
 **Reason:** This provides a usable default without bundling a large asset or requiring users to locate a model manually.
+
+---
+
+## ADR-13 — Automatic Per-Recording Language Detection
+
+**Decision:** Configure each Whisper transcription request with a null language (`FullParams::set_language(None)`).
+
+**Reason:** In `whisper-rs` 0.16 / whisper.cpp 1.8.3, this detects the source language and continues decoding. `set_detect_language(true)` is detection-only and returns before producing transcript segments. This supports Portuguese and other languages without introducing a language setting or English translation.
 
 ---
 

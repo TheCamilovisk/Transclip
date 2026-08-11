@@ -27,6 +27,7 @@ The application shall support:
 - microphone audio recording;
 - local keyboard commands;
 - voice-to-text transcription;
+- automatic source-language detection for each transcription;
 - transcription cancellation;
 - recording cancellation;
 - terminal status feedback;
@@ -182,11 +183,12 @@ No incomplete text shall be printed or copied to the clipboard.
 
 When transcription completes successfully, the application shall:
 
-1. retrieve and normalize the complete transcription text;
-2. print the text in the terminal;
-3. copy the complete text to the system clipboard;
-4. indicate that the text was copied successfully;
-5. return to **Ready to Record** mode.
+1. automatically detect the recording's spoken language and retrieve its complete transcription without translating it to English;
+2. normalize the complete transcription text;
+3. print the text in the terminal;
+4. copy the complete text to the system clipboard;
+5. indicate that the text was copied successfully;
+6. return to **Ready to Record** mode.
 
 Example:
 
@@ -666,6 +668,8 @@ The initial version shall be considered functionally complete when all of the fo
 17. Clipboard failure does not discard an otherwise successful transcription.
 
 18. Multisegment transcription is displayed as normalized plain text without decoder-segment line breaks, copied unchanged to the clipboard, and every terminal output line remains left-aligned while per-key terminal input mode is active.
+
+19. A Portuguese recording is automatically detected and transcribed in Portuguese rather than translated to English; a later recording in another supported language is detected independently.
 
 ---
 
