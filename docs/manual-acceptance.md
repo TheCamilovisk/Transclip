@@ -55,35 +55,45 @@ commands are always visible; the latest successful transcription remains
 visible until a later successful transcription replaces it. Normal state
 changes must not append duplicated interface blocks to terminal history.
 
+Only the status line is styled (functional spec criterion 21): the state
+emoji and color are scoped to it, and every following logical line
+(transcription, notice, commands) stays in the terminal default color.
+
 ```text
-Ready to record
+🟢 Ready to record
 
 Ctrl+R  Start recording
 ```
 
+The `🟢` status is rendered in light green.
+
 ```text
-Recording...
+🔴 Recording...
 
 Ctrl+R  Finish
 Esc     Cancel
 ```
 
+The `🔴` status is rendered in light red.
+
 ```text
-Transcribing...
+⚙️ Transcribing...
 
 Esc     Cancel
 ```
 
 ```text
-Cancelling transcription...
+⚙️ Cancelling transcription...
 
 Esc     Cancel
 ```
+
+The `⚙️` statuses render in the terminal default color.
 
 Successful cycle (the displayed text must equal the clipboard content):
 
 ```text
-Ready to record
+🟢 Ready to record
 
 This is the text that was recorded.
 
@@ -92,10 +102,12 @@ Copied to clipboard.
 Ctrl+R  Start recording
 ```
 
+The transcription remains neutral while the `🟢` Ready status is light green.
+
 Recoverable errors keep the app usable:
 
 ```text
-Ready to record
+🟢 Ready to record
 
 Error: unable to start recording: <reason>
 
@@ -103,7 +115,7 @@ Ctrl+R  Start recording
 ```
 
 ```text
-Ready to record
+🟢 Ready to record
 
 Error: recording failed: <reason>
 
@@ -111,7 +123,7 @@ Ctrl+R  Start recording
 ```
 
 ```text
-Ready to record
+🟢 Ready to record
 
 Error: transcription failed: <reason>
 
@@ -121,7 +133,7 @@ Ctrl+R  Start recording
 Clipboard failure keeps the successful transcription (functional spec 15.4):
 
 ```text
-Ready to record
+🟢 Ready to record
 
 This is the text that was recorded.
 
@@ -151,6 +163,7 @@ Startup failure (model provisioning/load or terminal init) prints a clear
 | 12 | Ctrl+C / error exit | Any state (Ready, Recording, Transcribing) | Recorder/worker cleanup follows the bounded shutdown policy; terminal restored (cursor shown, raw mode off); exit code 0. |
 | 13 | Automatic language detection | Working microphone; display session; a Portuguese utterance and a later utterance in another supported language | Each final result remains in its spoken language rather than being translated to English. Portuguese output is readable Portuguese; the second recording is detected independently without restarting or reloading the model. |
 | 14 | Fixed UI replacement | Working microphone; display session; two distinct spoken utterances | After each completion, status, commands, one latest transcription, and one notice occupy the same fixed interface. The second transcript replaces the first; resize redraws the current interface without losing it. |
+| 15 | State visual feedback | Color-capable terminal; display session | Ready shows `🟢` light green; Recording shows `🔴` light red; Transcribing and Cancelling show `⚙️` in the default color. Only the status line is styled: transcription, notices, and command hints remain neutral, and a resize redraw never bleeds the status color into them. |
 
 ## Record-keeping
 
