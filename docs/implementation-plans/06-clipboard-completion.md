@@ -14,7 +14,7 @@ Every accepted final transcription is printed and then copied to the Linux syste
 1. Add the smallest practical clipboard boundary in `clipboard.rs`, such as `copy_text(&str) -> Result<(), ClipboardError>`. Use a fake implementation in controller tests.
 2. Construct/use the real arboard implementation on the main thread, consistent with the architecture. Do not move application-state logic into the clipboard module.
 3. On active Running completion: print the exact final text first, attempt `copy_text` with the same text, emit `Copied to clipboard.` on success, or an explicit warning on failure, then return Ready.
-4. Ensure output remains part of normal terminal history even after a later recording starts.
+4. Preserve the successful canonical text in application-owned display state after a later recording starts. Slice 10 supersedes this slice's original terminal-history behavior: a later successful completion replaces the displayed text in the fixed interface.
 5. Keep clipboard invocation exclusively on this accepted completion path. Failed, stale, cancelling, and cancelled outcomes must have no copy action.
 6. Surface backend errors without exposing sensitive transcription content unnecessarily in diagnostics.
 

@@ -30,7 +30,7 @@ Resolved 2026-08-10 while implementing slice 1. Blocking rows D1–D3 are satisf
 | D3 | Baseline: Linux x86_64 desktop. Build prerequisites: cargo/rustc, cmake ≥ 3.5, a C/C++ compiler, and libclang (bindgen); runtime: glibc, libstdc++, libm, no OpenSSL (HTTPS via rustls). Validated on Ubuntu 24.04 (gcc 13.3, cmake 3.28, clang 18). Unsupported runtime: a non-Linux OS produces a clear startup error and exits non-zero before any interactive state is entered. CPAL/arboard native-dependency policies are deferred to slices 3/5; packaging is deferred to slice 8. | `ModelError::UnsupportedRuntime` path in `src/main.rs`; build prerequisites recorded here. |
 | D4 | Audio contract: target Whisper sample rate, supported CPAL sample formats/channel layouts, resampler, silence/empty-recording behavior, and stop/flush failure behavior. | 3+ | Unit fixtures establish conversion/downmix/resampling behavior. |
 | D5 | Worker lifecycle: bounded job protocol, startup handshake, submission failure, panic policy, shutdown signal/acknowledgement, join timeout, and repeated Ctrl+C behavior. | 4, 6, 7 | ✅ Resolved during slice 4 — see Slice 4 Gate Resolutions below. |
-| D6 | Terminal operational policy: append/redraw approach, resize handling, runtime I/O failure, raw-mode Ctrl+C behavior, and shutdown wait policy. | 1, 2, 7 | ✅ Resolved during slice 2 — see Slice 2 Gate Resolutions below. |
+| D6 | Terminal operational policy: append/redraw approach, resize handling, runtime I/O failure, raw-mode Ctrl+C behavior, and shutdown wait policy. | 1, 2, 7 | Superseded for fixed-UI behavior by D7 in slice 10; all non-rendering D6 decisions remain in effect. |
 
 ## Slice 2 Gate Resolutions (D6)
 
@@ -132,6 +132,14 @@ Resolved 2026-08-11 while implementing slice 9. The existing pinned multilingual
 | ID | Resolution | Evidence |
 | --- | --- | --- |
 | Language detection | Each `WhisperTranscriber::transcribe` call creates fresh `FullParams` and calls `params.set_language(None)`. In whisper-rs 0.16 this sets `language` to null; whisper.cpp 1.8.3 then calls `whisper_lang_auto_detect_with_state`, replaces the request language with the detected code, and continues decoding. `set_detect_language(true)` is not used: it follows the same detection path but returns `0` immediately after detection, before segments are produced. Translation remains false by default and is never enabled. | whisper-rs 0.16 `whisper_params.rs` documents `set_language(None)` as automatic detection and `set_detect_language(true)` as equivalent detection setup; vendored whisper.cpp 1.8.3 `whisper_full_with_state` lines 6812-6826 shows the detection path and the early return guarded by `params.detect_language`; implementation is `src/transcriber.rs`. |
+
+## Slice 10 Gate Resolution (D7 - fixed terminal UI)
+
+Resolved before implementing slice 10 for issue 22. This supersedes only D6's append-only rendering decision; its input polling, key mapping, runtime-I/O, raw-mode Ctrl+C, and shutdown policies remain unchanged.
+
+| ID | Resolution | Evidence |
+| --- | --- | --- |
+| D7 | **Rendering policy**: render one bounded complete view in place whenever display state changes. The view contains state-derived status and commands, `latest_transcription: Option<String>`, and `notice: Option<String>`. The controller owns both optional display values: a successful completion replaces `latest_transcription` and sets a copy-success or clipboard-warning notice; recoverable errors replace only `notice`; cancelled and failed recordings/transcriptions do not clear the most recent successful transcription. The terminal boundary alone issues Crossterm cursor/screen commands and serializes logical newlines as CRLF; canonical transcript text reaches the clipboard unchanged. **Redraw strategy**: move to the interface origin, clear the previously occupied view region or the terminal viewport, write the entire current view, and flush as one render operation; no normal transition appends output. **Resize**: resize events are delivered to the application loop and request a redraw of the current view without changing application state. **Failure/cleanup**: terminal write failures still propagate as `TerminalError` to `main`; `TerminalGuard` still restores raw mode and cursor visibility. The fixed interface may leave its final rendered content visible after terminal restoration. | Architecture specification sections 19, 21, and 23; functional specification section 11 and acceptance criterion 20; slice 10 renderer byte-level and controller-view tests; manual acceptance multiple-cycle scenario. |
 
 ## Non-Goals
 

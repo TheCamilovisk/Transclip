@@ -190,21 +190,19 @@ When transcription completes successfully, the application shall:
 5. indicate that the text was copied successfully;
 6. return to **Ready to Record** mode.
 
-Example:
+Example fixed interface after a successful transcription:
 
 ```text
-Transcription:
+Ready to record
 
 This is the text that was recorded.
 
 Copied to clipboard.
 
-Ready to record
-
 Ctrl+R  Start recording
 ```
 
-The transcription shall remain visible in the terminal output after the application returns to the ready state.
+The application shall retain and display only the most recent successful transcription for the remainder of the session or until a later successful transcription replaces it. A new successful transcription shall replace the previous one in the same transcription area; it shall not be appended below the previous transcription. Cancelled or failed recordings shall not replace the displayed successful transcription.
 
 The successful transcription is canonical plain text. Decoder or timestamp segment boundaries shall not become user-visible line breaks. The application shall trim segment-boundary whitespace, discard empty segments, and join the remaining text with a single space. This canonical text is the text printed as the result and the exact text copied to the clipboard.
 
@@ -371,6 +369,8 @@ The terminal shall also display the keyboard commands available in the current m
 
 Every displayed logical line, including status text, blank lines, and transcription output, shall begin at the terminal's left margin. Enabling per-key terminal input mode shall not cause a later line to retain the preceding line's cursor column. Terminal line-ending serialization is presentation-only and shall not change the canonical transcription text.
 
+The terminal is a fixed interactive interface rather than append-only command output. Rendering a state change, a notice, or a new successful transcription shall redraw the existing interface in place without duplicating status text, keyboard commands, errors, warnings, or previous transcription text in terminal history. The interface shall contain the current status, the most recent successful transcription when one exists, the available commands, and at most one transient notice. A new notice replaces the prior notice; a new successful transcription replaces the prior successful transcription. A transient notice does not remove the most recent successful transcription.
+
 Example:
 
 ```text
@@ -389,7 +389,7 @@ Transcribing...
 Esc     Cancel
 ```
 
-Exact formatting, colors, symbols, and animations are implementation details and are not mandated by this specification.
+Exact layout, colors, symbols, and animations are implementation details, provided the status, latest transcription, current commands, and any transient notice remain understandable.
 
 ---
 
@@ -670,6 +670,8 @@ The initial version shall be considered functionally complete when all of the fo
 18. Multisegment transcription is displayed as normalized plain text without decoder-segment line breaks, copied unchanged to the clipboard, and every terminal output line remains left-aligned while per-key terminal input mode is active.
 
 19. A Portuguese recording is automatically detected and transcribed in Portuguese rather than translated to English; a later recording in another supported language is detected independently.
+
+20. The terminal UI remains fixed throughout the session: status, current commands, one latest successful transcription, and at most one transient notice are redrawn in place. A later successful transcription replaces the displayed text without growing terminal output or duplicating the interface.
 
 ---
 
