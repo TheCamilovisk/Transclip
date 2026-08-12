@@ -286,13 +286,11 @@ impl WhisperTranscriber {
     /// decoding state. Failure here is a worker startup failure reported by
     /// the startup handshake before Ready (decision D5).
     pub fn new(context: WhisperContext) -> Result<Self, String> {
-        // The app owns the terminal, so whisper.cpp and GGML logs (model
-        // init INFO lines, and — in debug builds — per-token WHISPER_DEBUG
-        // dumps) must not reach stdout. With no `log_backend`/`tracing_backend`
-        // feature enabled, `install_logging_hooks` routes them into a no-op
-        // trampoline (whisper-rs 0.16 `install_logging_hooks`). Safe to call
-        // multiple times; only the first call has an effect.
-        whisper_rs::install_logging_hooks();
+        // `main` installs the native logging hook before loading the model
+        // (architecture section 21); this second call guards any construction
+        // path that bypasses startup. It is idempotent — only the first call
+        // has an effect (whisper-rs 0.16 `install_logging_hooks`).
+        install_logging_hook();
         let state = context.create_state().map_err(|e| e.to_string())?;
         Ok(Self { state })
     }
@@ -465,6 +463,19 @@ fn panic_message(panic: &Box<dyn Any + Send>) -> String {
     } else {
         "unknown panic".to_string()
     }
+}
+
+/// Installs the whisper-rs native logging hook so Whisper and GGML
+/// diagnostics — including model-loading information — never reach the
+/// application's terminal output (slice 11; functional spec section 11,
+/// architecture section 21). With neither the `log_backend` nor the
+/// `tracing_backend` feature enabled (whisper-rs 0.16 `default = []`), the
+/// hook routes diagnostics through a no-op trampoline. Safe to call
+/// repeatedly; only the first call has an effect. Startup must install it
+/// before the first native Whisper operation — `load_model` itself emits
+/// diagnostics.
+pub fn install_logging_hook() {
+    whisper_rs::install_logging_hooks();
 }
 
 /// Loads the verified model artifact once. `Err` on any load failure; the
