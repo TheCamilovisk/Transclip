@@ -157,6 +157,8 @@ if [[ "$MODE" == "dry-run" ]]; then
   exit 0
 fi
 
+git push -u origin "$branch"
+
 existing="$(gh pr list --repo "$REPO" --head "$branch" --state all --json url -q '.[0].url // empty')"
 if [[ -n "$existing" ]]; then
   status="exists"
