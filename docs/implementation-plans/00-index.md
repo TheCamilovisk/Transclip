@@ -32,6 +32,7 @@ The release workflow is `Ctrl+R` to record, `Ctrl+R` to submit the completed rec
 | 8 | `09-transcript-normalization-and-terminal-line-endings.md` | Canonical transcript text and raw-mode-safe terminal line rendering | Slice 7, D6 |
 | 9 | `10-automatic-language-detection.md` | Per-recording multilingual Whisper detection and transcription | Slice 8, D1 |
 | 10 | `11-fixed-terminal-ui-latest-transcription.md` | In-place terminal UI with one replaceable latest transcription | Slice 9, D7 |
+| 11 | `12-clean-whisper-model-information-display.md` | Whisper/GGML log suppression before model loading | Slice 10 |
 
 ## Shared Contracts
 

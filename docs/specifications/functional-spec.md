@@ -371,6 +371,8 @@ Every displayed logical line, including status text, blank lines, and transcript
 
 The terminal is a fixed interactive interface rather than append-only command output. Rendering a state change, a notice, or a new successful transcription shall redraw the existing interface in place without duplicating status text, keyboard commands, errors, warnings, or previous transcription text in terminal history. The interface shall contain the current status, the most recent successful transcription when one exists, the available commands, and at most one transient notice. A new notice replaces the prior notice; a new successful transcription replaces the prior successful transcription. A transient notice does not remove the most recent successful transcription.
 
+Native Whisper and GGML diagnostic output, including model-loading information, shall not be displayed in the terminal. The fixed application interface is the first normal terminal output after successful startup.
+
 Example:
 
 ```text
