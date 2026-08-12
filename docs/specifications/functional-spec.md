@@ -675,6 +675,8 @@ The initial version shall be considered functionally complete when all of the fo
 
 20. The terminal UI remains fixed throughout the session: status, current commands, one latest successful transcription, and at most one transient notice are redrawn in place. A later successful transcription replaces the displayed text without growing terminal output or duplicating the interface.
 
+21. The status line uses the state-specific emoji and color: light-green `🟢` when ready, light-red `🔴` when recording, and neutral `⚙️` when transcribing or cancelling. Transcription text, notices, command hints, and Whisper/GGML output remain neutral.
+
 ---
 
 # 20. Initial Functional Boundary
