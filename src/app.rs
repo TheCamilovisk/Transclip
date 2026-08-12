@@ -5,9 +5,12 @@
 //! owns state transitions (architecture section 34); infrastructure returns
 //! values or emits events and never mutates application state.
 //!
-//! Rendering is data-driven: transitions produce an [`AppOutcome`] (whether
-//! the view changed plus output lines); the terminal renderer only writes
-//! what the controller reports (architecture section 21).
+//! Rendering is data-driven (decision D7): the controller owns the display
+//! data — mode-derived status and commands, the latest successful canonical
+//! transcription, and at most one transient notice — and the terminal
+//! renderer redraws the complete fixed view in place. No normal flow appends
+//! output or duplicated interface blocks to terminal history (functional
+//! spec section 11, architecture sections 21 and 23).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -95,43 +98,96 @@ pub enum TranscribingPhase {
 }
 
 impl AppMode {
-    /// The status block rendered for this mode (functional spec section 11,
+    /// The status line rendered for this mode (functional spec section 11,
     /// architecture section 22). Display data owned by the controller; the
     /// terminal renderer only writes it.
-    pub fn status_block(&self) -> String {
+    pub fn status(&self) -> &'static str {
         match self {
-            AppMode::Ready => "Ready to record\n\nCtrl+R  Start recording\n".to_string(),
-            AppMode::Recording => "Recording...\n\nCtrl+R  Finish\nEsc     Cancel\n".to_string(),
+            AppMode::Ready => "Ready to record",
+            AppMode::Recording => "Recording...",
             AppMode::Transcribing(Transcribing {
                 phase: TranscribingPhase::Running,
                 ..
-            }) => "Transcribing...\n\nEsc     Cancel\n".to_string(),
+            }) => "Transcribing...",
             AppMode::Transcribing(Transcribing {
                 phase: TranscribingPhase::Cancelling,
                 ..
-            }) => "Cancelling transcription...\n\nEsc     Cancel\n".to_string(),
+            }) => "Cancelling transcription...",
+        }
+    }
+
+    /// The keyboard commands available in this mode (functional spec section
+    /// 11, architecture section 22).
+    pub fn commands(&self) -> &'static str {
+        match self {
+            AppMode::Ready => "Ctrl+R  Start recording",
+            AppMode::Recording => "Ctrl+R  Finish\nEsc     Cancel",
+            AppMode::Transcribing(_) => "Esc     Cancel",
         }
     }
 }
 
+/// Complete display data for the fixed terminal interface (architecture
+/// sections 19, 21, 23; functional spec section 11; decision D7). Owned by
+/// the controller; the renderer writes only what this view contains and owns
+/// no business behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppView {
+    /// Current status line(s) (functional spec section 11).
+    pub status: String,
+    /// The most recent successful canonical transcription, if any. Only a
+    /// successful completion replaces it; cancelled or failed work never
+    /// removes it (functional spec section 6, plan step 3).
+    pub latest_transcription: Option<String>,
+    /// At most one transient notice (copy confirmation, recoverable error,
+    /// clipboard warning), if any (functional spec section 11, plan step 4).
+    pub notice: Option<String>,
+    /// Keyboard commands available in the current mode.
+    pub commands: String,
+}
+
+impl AppView {
+    /// The view as logical lines: status, optional latest transcription,
+    /// optional notice, then the current commands, each section separated by
+    /// a blank line (architecture section 23). Logical lines only — the
+    /// renderer performs CRLF serialization.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = vec![self.status.clone()];
+        if let Some(text) = &self.latest_transcription {
+            lines.push(String::new());
+            lines.push(text.clone());
+        }
+        if let Some(notice) = &self.notice {
+            lines.push(String::new());
+            lines.push(notice.clone());
+        }
+        lines.push(String::new());
+        lines.push(self.commands.clone());
+        lines
+    }
+}
+
 /// What a transition produced, for the caller to render (architecture section
-/// 21, plan step 7): whether the mode (status block) changed, and any lines
-/// appended to the persistent output area (errors, results).
+/// 21, decision D7): whether the fixed view must be redrawn in place. All
+/// display data lives in [`App`]; the renderer reads it through [`App::view`]
+/// and no normal flow appends to terminal history.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AppOutcome {
-    pub view_changed: bool,
-    pub lines: Vec<String>,
+    pub redraw: bool,
 }
 
 /// The application controller (architecture section 5.1). Owns the current
-/// mode, the recorder, the clipboard, and the bounded transcription job
-/// channel; all state transitions happen here and only here.
+/// mode, the recorder, the clipboard, the bounded transcription job channel,
+/// and the display data (`latest_transcription` and `notice`); all state
+/// transitions happen here and only here.
 pub struct App {
     mode: AppMode,
     next_id: u64,
     recorder: Box<dyn Recorder>,
     clipboard: Box<dyn Clipboard>,
     jobs: mpsc::SyncSender<TranscriptionJob>,
+    latest_transcription: Option<String>,
+    notice: Option<String>,
 }
 
 impl App {
@@ -146,11 +202,24 @@ impl App {
             recorder,
             clipboard,
             jobs,
+            latest_transcription: None,
+            notice: None,
         }
     }
 
     pub fn mode(&self) -> &AppMode {
         &self.mode
+    }
+
+    /// Complete display data for the renderer (architecture section 21, D7).
+    pub fn view(&self) -> AppView {
+        let mode = self.mode();
+        AppView {
+            status: mode.status().to_string(),
+            latest_transcription: self.latest_transcription.clone(),
+            notice: self.notice.clone(),
+            commands: mode.commands().to_string(),
+        }
     }
 
     /// Applies a focused-terminal command (functional spec section 17). The
@@ -231,15 +300,15 @@ impl App {
         match self.recorder.start() {
             Ok(()) => {
                 self.mode = AppMode::Recording;
-                AppOutcome {
-                    view_changed: true,
-                    lines: vec![],
-                }
+                AppOutcome { redraw: true }
             }
-            Err(err) => AppOutcome {
-                view_changed: false,
-                lines: vec![format!("Error: unable to start recording: {err}")],
-            },
+            Err(err) => {
+                // Recoverable error (functional spec 15.1): replace only the
+                // transient notice; the latest successful transcription and
+                // the mode stay put (plan step 4).
+                self.notice = Some(format!("Error: unable to start recording: {err}"));
+                AppOutcome { redraw: true }
+            }
         }
     }
 
@@ -248,10 +317,8 @@ impl App {
             Ok(audio) => audio,
             Err(err) => {
                 self.mode = AppMode::Ready;
-                return AppOutcome {
-                    view_changed: true,
-                    lines: vec![format!("Error: unable to stop recording: {err}")],
-                };
+                self.notice = Some(format!("Error: unable to stop recording: {err}"));
+                return AppOutcome { redraw: true };
             }
         };
         let id = TranscriptionId::new(self.next_id);
@@ -266,20 +333,16 @@ impl App {
             // The worker is not accepting jobs (receiver dropped); there is
             // nothing to transcribe, so report and return to Ready.
             self.mode = AppMode::Ready;
-            return AppOutcome {
-                view_changed: true,
-                lines: vec!["Error: unable to start transcription: worker unavailable".to_string()],
-            };
+            self.notice =
+                Some("Error: unable to start transcription: worker unavailable".to_string());
+            return AppOutcome { redraw: true };
         }
         self.mode = AppMode::Transcribing(Transcribing {
             phase: TranscribingPhase::Running,
             id,
             cancel,
         });
-        AppOutcome {
-            view_changed: true,
-            lines: vec![],
-        }
+        AppOutcome { redraw: true }
     }
 
     fn cancel_recording(&mut self) -> AppOutcome {
@@ -287,10 +350,7 @@ impl App {
         // (functional spec 4.2, 7.2).
         self.recorder.cancel();
         self.mode = AppMode::Ready;
-        AppOutcome {
-            view_changed: true,
-            lines: vec![],
-        }
+        AppOutcome { redraw: true }
     }
 
     fn begin_cancelling(&mut self) -> AppOutcome {
@@ -298,10 +358,7 @@ impl App {
             t.cancel.store(true, Ordering::SeqCst);
             t.phase = TranscribingPhase::Cancelling;
         }
-        AppOutcome {
-            view_changed: true,
-            lines: vec![],
-        }
+        AppOutcome { redraw: true }
     }
 
     fn on_transcription_completed(&mut self, id: TranscriptionId, text: String) -> AppOutcome {
@@ -314,33 +371,26 @@ impl App {
         self.mode = AppMode::Ready;
         match phase {
             TranscribingPhase::Running => {
-                // Successful completion (functional spec section 6): the
-                // exact final text enters the persistent output area first
-                // (plan step 4 — append-only history, decision D6), then the
-                // same text is copied byte-for-byte, and the outcome is
-                // reported. A copy failure never discards or reclassifies
-                // the successful transcription (functional spec 15.4,
-                // decision R4).
-                let mut lines = vec!["Transcription:".to_string(), String::new(), text.clone()];
-                match self.clipboard.copy_text(&text) {
-                    Ok(()) => lines.push("Copied to clipboard.".to_string()),
-                    Err(err) => lines.push(format!(
-                        "Warning: unable to copy transcription to clipboard: {err}"
-                    )),
-                }
-                AppOutcome {
-                    view_changed: true,
-                    lines,
-                }
+                // Successful completion (functional spec section 6, plan step
+                // 3): the exact canonical text becomes the displayed latest
+                // transcription, the same text is copied byte-for-byte, and
+                // the notice reports the copy outcome. A copy failure never
+                // discards or reclassifies the successful transcription
+                // (functional spec 15.4, decision R4).
+                self.latest_transcription = Some(text.clone());
+                self.notice = Some(match self.clipboard.copy_text(&text) {
+                    Ok(()) => "Copied to clipboard.".to_string(),
+                    Err(err) => {
+                        format!("Warning: unable to copy transcription to clipboard: {err}")
+                    }
+                });
+                AppOutcome { redraw: true }
             }
             // Decision R3: a completion received after cancellation was
             // requested is discarded, even if inference finished first. No
-            // text is printed or copied during the cancelling phase. The
+            // text is displayed or copied during the cancelling phase. The
             // worker stopping still returns us to Ready.
-            TranscribingPhase::Cancelling => AppOutcome {
-                view_changed: true,
-                lines: vec![],
-            },
+            TranscribingPhase::Cancelling => AppOutcome { redraw: true },
         }
     }
 
@@ -356,10 +406,7 @@ impl App {
             return AppOutcome::default();
         }
         self.mode = AppMode::Ready;
-        AppOutcome {
-            view_changed: true,
-            lines: vec![],
-        }
+        AppOutcome { redraw: true }
     }
 
     fn on_transcription_failed(&mut self, id: TranscriptionId, message: String) -> AppOutcome {
@@ -371,16 +418,16 @@ impl App {
         }
         self.mode = AppMode::Ready;
         match phase {
-            TranscribingPhase::Running => AppOutcome {
-                view_changed: true,
-                lines: vec![format!("Error: transcription failed: {message}")],
-            },
+            TranscribingPhase::Running => {
+                // Recoverable error (functional spec 15.3, plan step 4):
+                // replace only the transient notice; the latest successful
+                // transcription (if any) stays visible.
+                self.notice = Some(format!("Error: transcription failed: {message}"));
+                AppOutcome { redraw: true }
+            }
             // The worker stopped while cancelling; cancellation has
             // precedence and no error is surfaced (decision R3).
-            TranscribingPhase::Cancelling => AppOutcome {
-                view_changed: true,
-                lines: vec![],
-            },
+            TranscribingPhase::Cancelling => AppOutcome { redraw: true },
         }
     }
 
@@ -391,10 +438,8 @@ impl App {
         // Stop capture and discard unusable audio (functional spec 15.2).
         self.recorder.cancel();
         self.mode = AppMode::Ready;
-        AppOutcome {
-            view_changed: true,
-            lines: vec![format!("Error: recording failed: {message}")],
-        }
+        self.notice = Some(format!("Error: recording failed: {message}"));
+        AppOutcome { redraw: true }
     }
 }
 
@@ -406,29 +451,23 @@ enum ModeClass {
 }
 
 /// Runs the focused-terminal command loop (architecture section 8, decision
-/// D6): polls terminal input with a bounded timeout, drains worker events
-/// promptly, applies transitions, and renders only when the view changed or
-/// lines were produced. Never blocks on inference. Returns `Ok` on the exit
-/// key (raw-mode Ctrl+C).
+/// D6/D7): polls terminal input with a bounded timeout, drains worker events
+/// promptly, applies transitions, and redraws the fixed view in place only
+/// when display data changed or a resize requested a redraw. Never blocks on
+/// inference. Returns `Ok` on the exit key (raw-mode Ctrl+C).
 pub fn run(
     app: &mut App,
     worker_events: mpsc::Receiver<AppEvent>,
     renderer: &mut dyn Renderer,
 ) -> Result<(), TerminalError> {
-    // Initial Ready render (functional spec 4.1).
-    renderer
-        .render(Some(&app.mode().status_block()), &[])
-        .map_err(TerminalError::Write)?;
+    // Initial fixed-view render (functional spec 4.1, decision D7).
+    renderer.render(&app.view()).map_err(TerminalError::Write)?;
 
     loop {
         if terminal::poll_key(terminal::POLL_TIMEOUT)? {
-            if let Some(key) = terminal::read_event()? {
-                if terminal::is_exit_key(key) {
+            if let Some(input) = terminal::read_event()? {
+                if handle_input(app, input, renderer)? {
                     return Ok(());
-                }
-                if let Some(cmd) = terminal::map_key(key) {
-                    let outcome = app.on_command(cmd);
-                    render_outcome(app, outcome, renderer)?;
                 }
             }
         }
@@ -439,22 +478,43 @@ pub fn run(
     }
 }
 
+/// Handles one terminal input event (architecture section 8, decision D7):
+/// applies the mapped command or redraws the current view on a resize event.
+/// Returns `Ok(true)` when the exit key was pressed, `Ok(false)` otherwise.
+fn handle_input(
+    app: &mut App,
+    input: terminal::InputEvent,
+    renderer: &mut dyn Renderer,
+) -> Result<bool, TerminalError> {
+    match input {
+        terminal::InputEvent::Key(key) => {
+            if terminal::is_exit_key(key) {
+                return Ok(true);
+            }
+            if let Some(cmd) = terminal::map_key(key) {
+                let outcome = app.on_command(cmd);
+                render_outcome(app, outcome, renderer)?;
+            }
+        }
+        // Resize events request a redraw of the current view without any
+        // state transition, display-data change, or worker/recorder change
+        // (functional spec 11, architecture section 23, plan step 6).
+        terminal::InputEvent::Resize => {
+            renderer.render(&app.view()).map_err(TerminalError::Write)?;
+        }
+    }
+    Ok(false)
+}
+
 fn render_outcome(
     app: &App,
     outcome: AppOutcome,
     renderer: &mut dyn Renderer,
 ) -> Result<(), TerminalError> {
-    if !outcome.view_changed && outcome.lines.is_empty() {
-        return Ok(());
+    if outcome.redraw {
+        renderer.render(&app.view()).map_err(TerminalError::Write)?;
     }
-    let status = if outcome.view_changed {
-        Some(app.mode().status_block())
-    } else {
-        None
-    };
-    renderer
-        .render(status.as_deref(), &outcome.lines)
-        .map_err(TerminalError::Write)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -463,6 +523,7 @@ mod tests {
     use crate::clipboard::{Clipboard, ClipboardError};
     use crate::recorder::RecorderError;
     use std::cell::RefCell;
+    use std::io;
     use std::rc::Rc;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -554,6 +615,31 @@ mod tests {
         }
     }
 
+    /// Fake renderer that records every rendered view (no terminal needed).
+    #[derive(Clone)]
+    struct RecordingRenderer {
+        rendered: Rc<RefCell<Vec<AppView>>>,
+    }
+
+    impl RecordingRenderer {
+        fn new() -> Self {
+            Self {
+                rendered: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+
+        fn rendered(&self) -> Vec<AppView> {
+            self.rendered.borrow().clone()
+        }
+    }
+
+    impl Renderer for RecordingRenderer {
+        fn render(&mut self, view: &AppView) -> io::Result<()> {
+            self.rendered.borrow_mut().push(view.clone());
+            Ok(())
+        }
+    }
+
     struct Harness {
         app: App,
         fake: FakeRecorder,
@@ -612,8 +698,7 @@ mod tests {
     fn ready_toggle_recording_starts_recorder_and_enters_recording() {
         let mut h = harness();
         let outcome = h.app.on_command(UserCommand::ToggleRecording);
-        assert!(outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Recording));
         assert_eq!(h.fake.calls(), vec![RecorderCall::Start]);
     }
@@ -622,8 +707,7 @@ mod tests {
     fn ready_cancel_is_ignored() {
         let mut h = harness();
         let outcome = h.app.on_command(UserCommand::Cancel);
-        assert!(!outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(!outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert!(h.fake.calls().is_empty());
         assert!(
@@ -637,8 +721,7 @@ mod tests {
         let mut h = harness();
         h.app.on_command(UserCommand::ToggleRecording);
         let outcome = h.app.on_command(UserCommand::ToggleRecording);
-        assert!(outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(outcome.redraw);
 
         let t = assert_transcribing(h.app.mode(), TranscribingPhase::Running);
         assert_eq!(t.id, TranscriptionId::new(1));
@@ -659,8 +742,7 @@ mod tests {
         let mut h = harness();
         h.app.on_command(UserCommand::ToggleRecording);
         let outcome = h.app.on_command(UserCommand::Cancel);
-        assert!(outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert_eq!(
             h.fake.calls(),
@@ -685,8 +767,7 @@ mod tests {
         h.fake.clear_calls();
 
         let outcome = h.app.on_command(UserCommand::ToggleRecording);
-        assert!(!outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(!outcome.redraw);
         assert_transcribing(h.app.mode(), TranscribingPhase::Running);
         assert!(h.fake.calls().is_empty());
         assert!(
@@ -707,8 +788,7 @@ mod tests {
         let job = h.rx.recv().expect("a job must be submitted");
 
         let outcome = h.app.on_command(UserCommand::Cancel);
-        assert!(outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(outcome.redraw);
         let t = assert_transcribing(h.app.mode(), TranscribingPhase::Cancelling);
         assert!(
             t.cancel.load(Ordering::SeqCst),
@@ -729,13 +809,11 @@ mod tests {
         h.fake.clear_calls();
 
         let outcome = h.app.on_command(UserCommand::ToggleRecording);
-        assert!(!outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(!outcome.redraw);
         assert_transcribing(h.app.mode(), TranscribingPhase::Cancelling);
 
         let outcome = h.app.on_command(UserCommand::Cancel);
-        assert!(!outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(!outcome.redraw);
         assert_transcribing(h.app.mode(), TranscribingPhase::Cancelling);
         assert!(h.fake.calls().is_empty());
         assert!(
@@ -754,12 +832,15 @@ mod tests {
         });
 
         let outcome = h.app.on_command(UserCommand::ToggleRecording);
-        assert!(!outcome.view_changed);
+        assert!(outcome.redraw, "the notice changed, so the view redraws");
         assert!(matches!(h.app.mode(), AppMode::Ready));
+        let view = h.app.view();
+        assert_eq!(view.status, "Ready to record");
         assert_eq!(
-            outcome.lines,
-            vec!["Error: unable to start recording: unable to access microphone"]
+            view.notice.as_deref(),
+            Some("Error: unable to start recording: unable to access microphone")
         );
+        assert_eq!(view.latest_transcription, None);
         assert!(
             h.clipboard.calls().is_empty(),
             "a failed start never copies"
@@ -775,11 +856,11 @@ mod tests {
         h.app.on_command(UserCommand::ToggleRecording);
 
         let outcome = h.app.on_command(UserCommand::ToggleRecording);
-        assert!(outcome.view_changed);
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert_eq!(
-            outcome.lines,
-            vec!["Error: unable to stop recording: stream died"]
+            h.app.view().notice.as_deref(),
+            Some("Error: unable to stop recording: stream died")
         );
         assert!(h.rx.try_recv().is_err(), "no job on a failed stop");
         assert!(h.clipboard.calls().is_empty(), "a failed stop never copies");
@@ -795,11 +876,11 @@ mod tests {
         app.on_command(UserCommand::ToggleRecording);
 
         let outcome = app.on_command(UserCommand::ToggleRecording);
-        assert!(outcome.view_changed);
+        assert!(outcome.redraw);
         assert!(matches!(app.mode(), AppMode::Ready));
         assert_eq!(
-            outcome.lines,
-            vec!["Error: unable to start transcription: worker unavailable"]
+            app.view().notice.as_deref(),
+            Some("Error: unable to start transcription: worker unavailable")
         );
         assert!(
             clipboard.calls().is_empty(),
@@ -815,11 +896,11 @@ mod tests {
         let outcome = h
             .app
             .on_event(AppEvent::RecordingFailed("device disconnected".to_string()));
-        assert!(outcome.view_changed);
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert_eq!(
-            outcome.lines,
-            vec!["Error: recording failed: device disconnected"]
+            h.app.view().notice.as_deref(),
+            Some("Error: recording failed: device disconnected")
         );
         assert_eq!(
             h.fake.calls(),
@@ -838,8 +919,7 @@ mod tests {
         let outcome = h
             .app
             .on_event(AppEvent::RecordingFailed("noise".to_string()));
-        assert!(!outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(!outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert!(h.fake.calls().is_empty());
         assert!(
@@ -851,7 +931,7 @@ mod tests {
     // ---- Transcription outcomes (architecture section 17) ----
 
     #[test]
-    fn completed_during_running_prints_text_copies_and_reports_success() {
+    fn completed_during_running_displays_text_copies_and_confirms() {
         let mut h = harness();
         let id = start_transcribing(&mut h);
 
@@ -859,13 +939,15 @@ mod tests {
             id,
             text: "hello world".to_string(),
         });
-        assert!(outcome.view_changed);
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
+        let view = h.app.view();
         assert_eq!(
-            outcome.lines,
-            vec!["Transcription:", "", "hello world", "Copied to clipboard.",],
-            "the final transcription is clearly labeled, then copied (plan step 3)"
+            view.latest_transcription.as_deref(),
+            Some("hello world"),
+            "the final text is displayed as the latest transcription"
         );
+        assert_eq!(view.notice.as_deref(), Some("Copied to clipboard."));
         assert_eq!(
             h.clipboard.calls(),
             vec![ClipboardCall {
@@ -876,26 +958,28 @@ mod tests {
     }
 
     #[test]
-    fn copied_text_matches_printed_text_byte_for_byte() {
+    fn copied_text_matches_displayed_text_byte_for_byte() {
         let mut h = harness();
         let id = start_transcribing(&mut h);
         // Deliberately non-trivial text (whitespace, unicode, newline) so the
-        // byte-identity guarantee between print and copy is actually exercised.
+        // byte-identity guarantee between display and copy is actually
+        // exercised.
         let text = "Olá mundo!\n  segunda linha\tcom tab".to_string();
 
         let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
             id,
             text: text.clone(),
         });
-        assert_eq!(outcome.lines[3], "Copied to clipboard.");
+        assert!(outcome.redraw);
         assert_eq!(
-            outcome.lines[2], text,
-            "printed line must equal the copied text"
+            h.app.view().latest_transcription.as_deref(),
+            Some(text.as_str()),
+            "displayed text must equal the copied text"
         );
         assert_eq!(
             h.clipboard.calls(),
             vec![ClipboardCall { text: text.clone() }],
-            "clipboard content must match the printed transcription (functional spec 14)"
+            "clipboard content must match the displayed transcription (functional spec 14)"
         );
     }
 
@@ -911,7 +995,11 @@ mod tests {
             id,
             text: canonical.clone(),
         });
-        assert_eq!(outcome.lines[2], canonical);
+        assert!(outcome.redraw);
+        assert_eq!(
+            h.app.view().latest_transcription.as_deref(),
+            Some(canonical.as_str())
+        );
         assert_eq!(
             h.clipboard.calls(),
             vec![ClipboardCall {
@@ -944,17 +1032,19 @@ mod tests {
             id,
             text: "hello world".to_string(),
         });
-        assert!(outcome.view_changed);
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
+        let view = h.app.view();
         assert_eq!(
-            outcome.lines,
-            vec![
-                "Transcription:",
-                "",
-                "hello world",
-                "Warning: unable to copy transcription to clipboard: no clipboard service reachable",
-            ],
-            "a clipboard failure still prints the transcription, then warns (functional spec 15.4)"
+            view.latest_transcription.as_deref(),
+            Some("hello world"),
+            "a clipboard failure still displays the transcription (functional spec 15.4)"
+        );
+        assert_eq!(
+            view.notice.as_deref(),
+            Some(
+                "Warning: unable to copy transcription to clipboard: no clipboard service reachable"
+            )
         );
         assert_eq!(
             h.clipboard.calls(),
@@ -975,10 +1065,11 @@ mod tests {
             id,
             text: "late result".to_string(),
         });
-        assert!(outcome.view_changed, "the worker stopping returns to Ready");
+        assert!(outcome.redraw, "the worker stopping returns to Ready");
         assert!(matches!(h.app.mode(), AppMode::Ready));
-        assert!(
-            outcome.lines.is_empty(),
+        assert_eq!(
+            h.app.view().latest_transcription,
+            None,
             "a completion after cancellation must be discarded (R3)"
         );
         assert!(
@@ -994,9 +1085,8 @@ mod tests {
         h.app.on_command(UserCommand::Cancel);
 
         let outcome = h.app.on_event(AppEvent::TranscriptionCancelled { id });
-        assert!(outcome.view_changed);
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
-        assert!(outcome.lines.is_empty());
         assert!(
             h.clipboard.calls().is_empty(),
             "a cancelled transcription never copies (functional spec 14)"
@@ -1042,11 +1132,11 @@ mod tests {
             id,
             message: "no speech detected".to_string(),
         });
-        assert!(outcome.view_changed);
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
         assert_eq!(
-            outcome.lines,
-            vec!["Error: transcription failed: no speech detected"]
+            h.app.view().notice.as_deref(),
+            Some("Error: transcription failed: no speech detected")
         );
         assert!(
             h.clipboard.calls().is_empty(),
@@ -1064,9 +1154,13 @@ mod tests {
             id,
             message: "late failure".to_string(),
         });
-        assert!(outcome.view_changed, "worker stopped: back to Ready");
+        assert!(outcome.redraw, "worker stopped: back to Ready");
         assert!(matches!(h.app.mode(), AppMode::Ready));
-        assert!(outcome.lines.is_empty());
+        assert_eq!(
+            h.app.view().notice,
+            None,
+            "no error surfaces during cancellation (R3)"
+        );
         assert!(
             h.clipboard.calls().is_empty(),
             "no copy while cancelling (plan step 5)"
@@ -1081,8 +1175,7 @@ mod tests {
             id: TranscriptionId::new(7),
             text: "stale".to_string(),
         });
-        assert!(!outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(!outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
 
         // Active transcription with id 1: an event for id 2 is stale.
@@ -1092,8 +1185,7 @@ mod tests {
             id: TranscriptionId::new(2),
             text: "other job".to_string(),
         });
-        assert!(!outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(!outcome.redraw);
         assert_transcribing(h.app.mode(), TranscribingPhase::Running);
         assert!(
             h.clipboard.calls().is_empty(),
@@ -1116,8 +1208,7 @@ mod tests {
             },
         ] {
             let outcome = h.app.on_event(stale);
-            assert!(!outcome.view_changed);
-            assert!(outcome.lines.is_empty());
+            assert!(!outcome.redraw);
             assert!(matches!(h.app.mode(), AppMode::Ready));
         }
 
@@ -1135,8 +1226,7 @@ mod tests {
             },
         ] {
             let outcome = h.app.on_event(stale);
-            assert!(!outcome.view_changed);
-            assert!(outcome.lines.is_empty());
+            assert!(!outcome.redraw);
             assert_transcribing(h.app.mode(), TranscribingPhase::Running);
         }
         assert!(
@@ -1153,8 +1243,7 @@ mod tests {
         let id = h.rx.recv().unwrap().id;
 
         let outcome = h.app.on_event(AppEvent::TranscriptionCancelled { id });
-        assert!(!outcome.view_changed);
-        assert!(outcome.lines.is_empty());
+        assert!(!outcome.redraw);
         assert_transcribing(h.app.mode(), TranscribingPhase::Running);
         assert!(
             h.clipboard.calls().is_empty(),
@@ -1174,7 +1263,7 @@ mod tests {
                 id: job.id,
                 text: format!("result {expected}"),
             });
-            assert!(outcome.view_changed);
+            assert!(outcome.redraw);
             assert!(matches!(h.app.mode(), AppMode::Ready));
             let calls = h.clipboard.calls();
             assert_eq!(
@@ -1190,6 +1279,11 @@ mod tests {
                 "the copy carries that cycle's result text"
             );
         }
+        assert_eq!(
+            h.app.view().latest_transcription.as_deref(),
+            Some("result 2"),
+            "only the latest successful transcription remains displayed"
+        );
     }
 
     #[test]
@@ -1244,7 +1338,7 @@ mod tests {
         // success -> cancel recording -> success -> cancel transcription ->
         // recoverable failure -> success (plan step 5). Every cycle starts
         // from a clean Ready, ids stay monotonic, and only successful
-        // completions produce output lines and clipboard copies — cancelled
+        // completions produce displayed text and clipboard copies — cancelled
         // and failed cycles must not leak text (functional spec 14).
         let mut h = harness();
 
@@ -1254,32 +1348,34 @@ mod tests {
             id: id1,
             text: "one".to_string(),
         });
-        assert_eq!(
-            outcome.lines,
-            vec!["Transcription:", "", "one", "Copied to clipboard."]
-        );
+        assert!(outcome.redraw);
+        assert_eq!(h.app.view().latest_transcription.as_deref(), Some("one"));
+        assert_eq!(h.app.view().notice.as_deref(), Some("Copied to clipboard."));
         assert!(matches!(h.app.mode(), AppMode::Ready));
 
-        // Cycle 2: cancel recording — no job, no output.
+        // Cycle 2: cancel recording — no job, and the prior transcription and
+        // its notice stay visible (plan steps 3-4).
         h.app.on_command(UserCommand::ToggleRecording);
         let outcome = h.app.on_command(UserCommand::Cancel);
-        assert!(outcome.lines.is_empty());
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
+        assert_eq!(h.app.view().latest_transcription.as_deref(), Some("one"));
         assert!(
             h.rx.try_recv().is_err(),
             "a cancelled recording never submits a job"
         );
 
-        // Cycle 3: success.
+        // Cycle 3: success — replaces the displayed text.
         let id3 = start_transcribing(&mut h);
         let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
             id: id3,
             text: "three".to_string(),
         });
-        assert_eq!(outcome.lines[2], "three");
+        assert!(outcome.redraw);
+        assert_eq!(h.app.view().latest_transcription.as_deref(), Some("three"));
 
         // Cycle 4: cancel transcription — ready only after the worker
-        // acknowledgement, and nothing is printed for the cancelled cycle.
+        // acknowledgement, and nothing is displayed for the cancelled cycle.
         let id4 = start_transcribing(&mut h);
         h.app.on_command(UserCommand::Cancel);
         assert!(matches!(
@@ -1290,18 +1386,26 @@ mod tests {
             })
         ));
         let outcome = h.app.on_event(AppEvent::TranscriptionCancelled { id: id4 });
-        assert!(outcome.lines.is_empty());
+        assert!(outcome.redraw);
         assert!(matches!(h.app.mode(), AppMode::Ready));
+        assert_eq!(h.app.view().latest_transcription.as_deref(), Some("three"));
 
-        // Cycle 5: recoverable transcription failure — error line, no copy.
+        // Cycle 5: recoverable transcription failure — replaces only the
+        // notice; the latest transcription stays (plan step 4).
         let id5 = start_transcribing(&mut h);
         let outcome = h.app.on_event(AppEvent::TranscriptionFailed {
             id: id5,
             message: "no speech detected".to_string(),
         });
+        assert!(outcome.redraw);
         assert_eq!(
-            outcome.lines,
-            vec!["Error: transcription failed: no speech detected"]
+            h.app.view().latest_transcription.as_deref(),
+            Some("three"),
+            "a failure never replaces the prior successful transcription"
+        );
+        assert_eq!(
+            h.app.view().notice.as_deref(),
+            Some("Error: transcription failed: no speech detected")
         );
         assert!(matches!(h.app.mode(), AppMode::Ready));
 
@@ -1316,7 +1420,9 @@ mod tests {
             id: id6,
             text: "six".to_string(),
         });
-        assert_eq!(outcome.lines[2], "six");
+        assert!(outcome.redraw);
+        assert_eq!(h.app.view().latest_transcription.as_deref(), Some("six"));
+        assert_eq!(h.app.view().notice.as_deref(), Some("Copied to clipboard."));
         assert!(matches!(h.app.mode(), AppMode::Ready));
 
         assert_eq!(
@@ -1336,25 +1442,203 @@ mod tests {
         );
     }
 
-    // ---- Display data (functional spec section 11) ----
+    // ---- Fixed display view (decision D7, plan steps 1-6) ----
 
     #[test]
-    fn status_blocks_are_distinct_per_mode() {
+    fn initial_view_shows_ready_without_transcript_or_notice() {
+        let h = harness();
+        let view = h.app.view();
+        assert_eq!(view.status, "Ready to record");
+        assert_eq!(view.commands, "Ctrl+R  Start recording");
+        assert_eq!(view.latest_transcription, None);
+        assert_eq!(view.notice, None);
+    }
+
+    #[test]
+    fn mode_transitions_preserve_the_latest_transcription() {
+        let mut h = harness();
+        let id = start_transcribing(&mut h);
+        h.app.on_event(AppEvent::TranscriptionCompleted {
+            id,
+            text: "kept text".to_string(),
+        });
         assert_eq!(
-            AppMode::Ready.status_block(),
-            "Ready to record\n\nCtrl+R  Start recording\n"
+            h.app.view().latest_transcription.as_deref(),
+            Some("kept text")
+        );
+
+        // Status transitions (Recording, Transcribing, Ready) update the
+        // fixed view without clearing the prior successful transcription.
+        h.app.on_command(UserCommand::ToggleRecording);
+        assert_eq!(
+            h.app.view().latest_transcription.as_deref(),
+            Some("kept text")
+        );
+        h.app.on_command(UserCommand::ToggleRecording);
+        assert_eq!(
+            h.app.view().latest_transcription.as_deref(),
+            Some("kept text")
+        );
+    }
+
+    #[test]
+    fn later_completion_replaces_displayed_text_and_both_are_copied() {
+        let mut h = harness();
+        let id1 = start_transcribing(&mut h);
+        h.app.on_event(AppEvent::TranscriptionCompleted {
+            id: id1,
+            text: "first".to_string(),
+        });
+        assert_eq!(h.app.view().latest_transcription.as_deref(), Some("first"));
+
+        let id2 = start_transcribing(&mut h);
+        let outcome = h.app.on_event(AppEvent::TranscriptionCompleted {
+            id: id2,
+            text: "second".to_string(),
+        });
+        assert!(outcome.redraw);
+        assert_eq!(
+            h.app.view().latest_transcription.as_deref(),
+            Some("second"),
+            "a later success replaces the displayed text in the same area"
         );
         assert_eq!(
-            AppMode::Recording.status_block(),
-            "Recording...\n\nCtrl+R  Finish\nEsc     Cancel\n"
+            h.clipboard.calls(),
+            vec![
+                ClipboardCall {
+                    text: "first".to_string()
+                },
+                ClipboardCall {
+                    text: "second".to_string()
+                },
+            ],
+            "both successful texts are independently copied at completion time"
+        );
+    }
+
+    #[test]
+    fn cancellations_and_errors_preserve_latest_transcription_and_replace_only_notice() {
+        let mut h = harness();
+
+        // Establish a prior successful transcription and its notice.
+        let id = start_transcribing(&mut h);
+        h.app.on_event(AppEvent::TranscriptionCompleted {
+            id,
+            text: "prior success".to_string(),
+        });
+        assert_eq!(h.app.view().notice.as_deref(), Some("Copied to clipboard."));
+
+        // Cancel a recording: neither the transcription nor its notice is
+        // disturbed.
+        h.app.on_command(UserCommand::ToggleRecording);
+        h.app.on_command(UserCommand::Cancel);
+        let view = h.app.view();
+        assert_eq!(view.latest_transcription.as_deref(), Some("prior success"));
+        assert_eq!(view.notice.as_deref(), Some("Copied to clipboard."));
+
+        // Cancel a transcription: same guarantee.
+        let id2 = start_transcribing(&mut h);
+        h.app.on_command(UserCommand::Cancel);
+        h.app.on_event(AppEvent::TranscriptionCancelled { id: id2 });
+        let view = h.app.view();
+        assert_eq!(view.latest_transcription.as_deref(), Some("prior success"));
+        assert_eq!(view.notice.as_deref(), Some("Copied to clipboard."));
+
+        // A recoverable error replaces only the transient notice.
+        let id3 = start_transcribing(&mut h);
+        h.app.on_event(AppEvent::TranscriptionFailed {
+            id: id3,
+            message: "no speech detected".to_string(),
+        });
+        let view = h.app.view();
+        assert_eq!(view.latest_transcription.as_deref(), Some("prior success"));
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Error: transcription failed: no speech detected")
+        );
+    }
+
+    #[test]
+    fn resize_event_redraws_current_view_without_state_change() {
+        let mut h = harness();
+        let id = start_transcribing(&mut h);
+        h.app.on_event(AppEvent::TranscriptionCompleted {
+            id,
+            text: "resize me".to_string(),
+        });
+        let before = h.app.view();
+
+        let mut renderer = RecordingRenderer::new();
+        let exit = handle_input(&mut h.app, terminal::InputEvent::Resize, &mut renderer);
+        assert!(!exit.expect("a resize is not the exit key"));
+        assert_eq!(
+            h.app.view(),
+            before,
+            "a resize never changes application state or display data"
         );
         assert_eq!(
-            transcribing(TranscribingPhase::Running, 1).status_block(),
-            "Transcribing...\n\nEsc     Cancel\n"
+            renderer.rendered(),
+            vec![before],
+            "the resize requests an in-place redraw with unchanged display data"
+        );
+    }
+
+    #[test]
+    fn status_and_commands_are_distinct_per_mode() {
+        assert_eq!(AppMode::Ready.status(), "Ready to record");
+        assert_eq!(AppMode::Ready.commands(), "Ctrl+R  Start recording");
+        assert_eq!(AppMode::Recording.status(), "Recording...");
+        assert_eq!(
+            AppMode::Recording.commands(),
+            "Ctrl+R  Finish\nEsc     Cancel"
         );
         assert_eq!(
-            transcribing(TranscribingPhase::Cancelling, 1).status_block(),
-            "Cancelling transcription...\n\nEsc     Cancel\n"
+            transcribing(TranscribingPhase::Running, 1).status(),
+            "Transcribing..."
+        );
+        assert_eq!(
+            transcribing(TranscribingPhase::Cancelling, 1).status(),
+            "Cancelling transcription..."
+        );
+        assert_eq!(
+            transcribing(TranscribingPhase::Running, 1).commands(),
+            "Esc     Cancel"
+        );
+    }
+
+    #[test]
+    fn view_lines_compose_the_fixed_interface_sections() {
+        // No transcript, no notice: status, blank, commands (functional spec
+        // section 11 example, architecture section 23).
+        let view = AppView {
+            status: "Ready to record".to_string(),
+            latest_transcription: None,
+            notice: None,
+            commands: "Ctrl+R  Start recording".to_string(),
+        };
+        assert_eq!(
+            view.lines(),
+            vec!["Ready to record", "", "Ctrl+R  Start recording"]
+        );
+
+        // Successful cycle: status, transcription, notice, commands.
+        let view = AppView {
+            status: "Ready to record".to_string(),
+            latest_transcription: Some("hello world".to_string()),
+            notice: Some("Copied to clipboard.".to_string()),
+            commands: "Ctrl+R  Start recording".to_string(),
+        };
+        assert_eq!(
+            view.lines(),
+            vec![
+                "Ready to record",
+                "",
+                "hello world",
+                "",
+                "Copied to clipboard.",
+                "",
+                "Ctrl+R  Start recording",
+            ]
         );
     }
 }
