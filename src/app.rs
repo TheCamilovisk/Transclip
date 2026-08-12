@@ -127,14 +127,33 @@ impl AppMode {
     }
 }
 
+/// Presentation-only status style (decision D8, ADR-14): state-derived
+/// metadata that lets the terminal renderer select the status emoji and
+/// color at the terminal boundary. `AppView` itself never contains ANSI
+/// escapes — styling is scoped to the status line and applied by the
+/// renderer only (functional spec section 11, criterion 21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusStyle {
+    /// Ready: `🟢` light green.
+    Ready,
+    /// Recording: `🔴` light red.
+    Recording,
+    /// Transcribing or Cancelling: `⚙️` in the terminal default color.
+    Neutral,
+}
+
 /// Complete display data for the fixed terminal interface (architecture
 /// sections 19, 21, 23; functional spec section 11; decision D7). Owned by
 /// the controller; the renderer writes only what this view contains and owns
 /// no business behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppView {
-    /// Current status line(s) (functional spec section 11).
+    /// Current status line(s) (functional spec section 11). The wording is
+    /// plain logical text; the renderer adds the state emoji prefix.
     pub status: String,
+    /// Presentation-only status style (decision D8): the renderer maps it to
+    /// the state emoji and scoped color without ever styling other content.
+    pub status_style: StatusStyle,
     /// The most recent successful canonical transcription, if any. Only a
     /// successful completion replaces it; cancelled or failed work never
     /// removes it (functional spec section 6, plan step 3).
@@ -212,10 +231,18 @@ impl App {
     }
 
     /// Complete display data for the renderer (architecture section 21, D7).
+    /// The status style is derived from the mode: `Ready`, `Recording`, and
+    /// `Neutral` for Transcribing/Cancelling (decision D8) — the status
+    /// wording and every state transition stay unchanged.
     pub fn view(&self) -> AppView {
         let mode = self.mode();
         AppView {
             status: mode.status().to_string(),
+            status_style: match mode {
+                AppMode::Ready => StatusStyle::Ready,
+                AppMode::Recording => StatusStyle::Recording,
+                AppMode::Transcribing(_) => StatusStyle::Neutral,
+            },
             latest_transcription: self.latest_transcription.clone(),
             notice: self.notice.clone(),
             commands: mode.commands().to_string(),
@@ -1612,6 +1639,7 @@ mod tests {
         // section 11 example, architecture section 23).
         let view = AppView {
             status: "Ready to record".to_string(),
+            status_style: StatusStyle::Ready,
             latest_transcription: None,
             notice: None,
             commands: "Ctrl+R  Start recording".to_string(),
@@ -1624,6 +1652,7 @@ mod tests {
         // Successful cycle: status, transcription, notice, commands.
         let view = AppView {
             status: "Ready to record".to_string(),
+            status_style: StatusStyle::Ready,
             latest_transcription: Some("hello world".to_string()),
             notice: Some("Copied to clipboard.".to_string()),
             commands: "Ctrl+R  Start recording".to_string(),
