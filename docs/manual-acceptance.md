@@ -95,25 +95,25 @@ Ctrl+R  Start recording
 Recoverable errors keep the app usable:
 
 ```text
+Ready to record
+
 Error: unable to start recording: <reason>
 
-Ready to record
-
 Ctrl+R  Start recording
 ```
 
 ```text
+Ready to record
+
 Error: recording failed: <reason>
 
-Ready to record
-
 Ctrl+R  Start recording
 ```
 
 ```text
-Error: transcription failed: <reason>
-
 Ready to record
+
+Error: transcription failed: <reason>
 
 Ctrl+R  Start recording
 ```
@@ -121,11 +121,11 @@ Ctrl+R  Start recording
 Clipboard failure keeps the successful transcription (functional spec 15.4):
 
 ```text
+Ready to record
+
 This is the text that was recorded.
 
 Warning: unable to copy transcription to clipboard: <reason>
-
-Ready to record
 
 Ctrl+R  Start recording
 ```

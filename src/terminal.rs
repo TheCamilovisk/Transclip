@@ -5,19 +5,20 @@
 //! application and restores raw mode and cursor visibility on drop. The
 //! input layer polls with a bounded timeout and maps physical keys to
 //! application commands (architecture section 20); the `Renderer` boundary
-//! writes only what the controller reports — it owns no business behavior
-//! (architecture section 21).
+//! redraws the complete fixed view the controller owns — it has no business
+//! behavior (architecture sections 21, 23, decision D7).
 
 use std::io::{self, Write};
 use std::time::Duration;
 
-use crossterm::cursor::{Hide, Show};
+use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::queue;
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use thiserror::Error;
 
-use crate::app::UserCommand;
+use crate::app::{AppView, UserCommand};
 
 /// Bounded terminal-input poll timeout so worker events are drained promptly
 /// and inference never blocks the loop (functional spec 10, architecture
@@ -81,22 +82,22 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Presentation boundary: the controller produces display data (a new status
-/// block and/or output lines) and the renderer writes it. Rendering is
-/// append-only — status blocks and lines accumulate in the persistent
-/// terminal history (architecture section 23, decision D6).
+/// Presentation boundary (architecture sections 19, 21, 23; decision D7):
+/// the controller owns the display data ([`AppView`]) and the renderer
+/// redraws the complete fixed view in place — no append-only history.
 pub trait Renderer {
-    /// Writes the new status block (when `status_block` is `Some`) and
-    /// appends `lines` to the persistent output area.
-    fn render(&mut self, status_block: Option<&str>, lines: &[String]) -> io::Result<()>;
+    /// Redraws the complete fixed view in place: moves to the interface
+    /// origin, clears stale content from the prior view, writes the current
+    /// view, and flushes (decision D7).
+    fn render(&mut self, view: &AppView) -> io::Result<()>;
 }
 
-/// Writes render requests to stdout (append-only line rendering, D6).
+/// Writes render requests to stdout (in-place fixed-view redraw, D7).
 pub struct TerminalRenderer;
 
 impl Renderer for TerminalRenderer {
-    fn render(&mut self, status_block: Option<&str>, lines: &[String]) -> io::Result<()> {
-        render_to(&mut io::stdout(), status_block, lines)
+    fn render(&mut self, view: &AppView) -> io::Result<()> {
+        render_to(&mut io::stdout(), view)
     }
 }
 
@@ -119,20 +120,18 @@ fn write_crlf(writer: &mut impl Write, text: &str) -> io::Result<()> {
     writer.write_all(&bytes[chunk_start..])
 }
 
-/// Serializes one render request into `writer` (append-only, decision D6):
-/// the status block and every output line are written through `write_crlf`,
-/// and the renderer-appended line terminator uses the same `\r\n` convention
-/// (architecture section 21).
-fn render_to(
-    writer: &mut impl Write,
-    status_block: Option<&str>,
-    lines: &[String],
-) -> io::Result<()> {
-    if let Some(block) = status_block {
-        write_crlf(writer, block)?;
-    }
-    for line in lines {
-        write_crlf(writer, line)?;
+/// Serializes one complete view into `writer` as a single in-place redraw
+/// (decision D7): move to the interface origin, clear stale content from the
+/// prior view, write every logical line through `write_crlf` (architecture
+/// section 21), and flush. The current view is written exactly once — a
+/// normal transition never appends a second interface block (functional
+/// spec section 11, acceptance criterion 20).
+fn render_to(writer: &mut impl Write, view: &AppView) -> io::Result<()> {
+    // `MoveTo` is 0-based, so (0, 0) is the top-left cell; clearing from the
+    // cursor down after moving to the origin erases the prior view region.
+    queue!(writer, MoveTo(0, 0), Clear(ClearType::FromCursorDown))?;
+    for line in view.lines() {
+        write_crlf(writer, &line)?;
         writer.write_all(b"\r\n")?;
     }
     writer.flush()?;
@@ -144,12 +143,22 @@ pub fn poll_key(timeout: Duration) -> Result<bool, TerminalError> {
     event::poll(timeout).map_err(TerminalError::Read)
 }
 
-/// Reads a single terminal event. Returns the key event, or `None` for
-/// non-key events (resize, focus, paste, mouse), which are ignored
-/// (decision D6). Never blocks for more than one queued event.
-pub fn read_event() -> Result<Option<KeyEvent>, TerminalError> {
+/// Terminal input forwarded to the application loop (decision D7): key
+/// events for command mapping and resize events that request an in-place
+/// redraw of the current view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEvent {
+    Key(KeyEvent),
+    Resize,
+}
+
+/// Reads a single terminal event. Returns the key or resize event, or `None`
+/// for non-key events (focus, paste, mouse), which are ignored (decision
+/// D6). Never blocks for more than one queued event.
+pub fn read_event() -> Result<Option<InputEvent>, TerminalError> {
     match event::read().map_err(TerminalError::Read)? {
-        Event::Key(key) => Ok(Some(key)),
+        Event::Key(key) => Ok(Some(InputEvent::Key(key))),
+        Event::Resize(_, _) => Ok(Some(InputEvent::Resize)),
         _ => Ok(None),
     }
 }
@@ -288,32 +297,110 @@ mod tests {
         assert_eq!(out, b"a\r\nb\r\n");
     }
 
+    /// The ANSI redraw prefix produced by the single in-place redraw
+    /// operation: move to the interface origin (`MoveTo(0, 0)` → `\x1b[1;1H`)
+    /// then clear the previously occupied region from the cursor down
+    /// (`ClearType::FromCursorDown` → `\x1b[J`). Pinned with crossterm 0.29.
+    const REDRAW_PREFIX: &str = "\u{1b}[1;1H\u{1b}[J";
+
     #[test]
-    fn render_to_uses_crlf_for_status_and_appended_terminators() {
+    fn render_to_clears_stale_content_then_writes_the_view_once() {
+        let mut out = Vec::new();
+        let view = AppView {
+            status: "Ready to record".to_string(),
+            latest_transcription: Some("hello world".to_string()),
+            notice: Some("Copied to clipboard.".to_string()),
+            commands: "Ctrl+R  Start recording".to_string(),
+        };
+        render_to(&mut out, &view).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with(REDRAW_PREFIX),
+            "one in-place redraw must clear stale content first: {text:?}"
+        );
+        let body = &text[REDRAW_PREFIX.len()..];
+        assert_eq!(
+            body,
+            "Ready to record\r\n\r\nhello world\r\n\r\nCopied to clipboard.\r\n\r\nCtrl+R  Start recording\r\n"
+        );
+        assert!(
+            body.as_bytes()
+                .windows(2)
+                .all(|w| !(w[1] == b'\n' && w[0] != b'\r')),
+            "every logical line feed must be serialized as CRLF"
+        );
+    }
+
+    #[test]
+    fn a_redraw_replaces_the_prior_view_without_duplicating_it() {
+        // First render: a successful cycle's fixed view.
         let mut out = Vec::new();
         render_to(
             &mut out,
-            Some("Transcribing...\n\nEsc     Cancel\n"),
-            &[
-                "Transcription:".to_string(),
-                String::new(),
-                // A persistent output item with an embedded logical newline:
-                // every line ending, including the renderer-appended
-                // terminator, must be `\r\n`.
-                "first\nsecond line".to_string(),
-            ],
+            &AppView {
+                status: "Ready to record".to_string(),
+                latest_transcription: Some("first result".to_string()),
+                notice: Some("Copied to clipboard.".to_string()),
+                commands: "Ctrl+R  Start recording".to_string(),
+            },
         )
         .unwrap();
-        let expected = concat!(
-            "Transcribing...\r\n\r\nEsc     Cancel\r\n",
-            "Transcription:\r\n",
-            "\r\n",
-            "first\r\nsecond line\r\n",
+        // Second render (e.g. a resize or a state transition): the current
+        // view with a multi-line commands block.
+        render_to(
+            &mut out,
+            &AppView {
+                status: "Recording...".to_string(),
+                latest_transcription: Some("first result".to_string()),
+                notice: Some("Copied to clipboard.".to_string()),
+                commands: "Ctrl+R  Finish\nEsc     Cancel".to_string(),
+            },
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        // The second redraw starts by clearing, then writes the complete
+        // current view exactly once — nothing from the prior view is
+        // repeated after the clear (functional spec 11, criterion 20).
+        let second_start = text.rfind(REDRAW_PREFIX).unwrap();
+        let second_body = &text[second_start + REDRAW_PREFIX.len()..];
+        assert_eq!(
+            second_body,
+            "Recording...\r\n\r\nfirst result\r\n\r\nCopied to clipboard.\r\n\r\nCtrl+R  Finish\r\nEsc     Cancel\r\n"
         );
-        assert_eq!(out, expected.as_bytes());
         assert!(
-            out.windows(2).all(|w| !(w[1] == b'\n' && w[0] != b'\r')),
+            !second_body.contains("Ready to record"),
+            "the stale status must not be repeated after the redraw"
+        );
+        assert!(
+            second_body
+                .as_bytes()
+                .windows(2)
+                .all(|w| !(w[1] == b'\n' && w[0] != b'\r')),
             "no bare line feed bytes anywhere in the render stream"
+        );
+    }
+
+    #[test]
+    fn render_to_handles_embedded_newlines_with_crlf() {
+        // The fixed view may carry embedded logical newlines (multi-line
+        // commands, multi-line notices); every one is serialized as CRLF
+        // (architecture section 21, plan step 5).
+        let mut out = Vec::new();
+        render_to(
+            &mut out,
+            &AppView {
+                status: "Transcribing...".to_string(),
+                latest_transcription: None,
+                notice: Some("first\nsecond line".to_string()),
+                commands: "Esc     Cancel".to_string(),
+            },
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let body = &text[REDRAW_PREFIX.len()..];
+        assert_eq!(
+            body,
+            "Transcribing...\r\n\r\nfirst\r\nsecond line\r\n\r\nEsc     Cancel\r\n"
         );
     }
 
