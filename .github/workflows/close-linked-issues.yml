@@ -1,11 +1,11 @@
-# Closes slice issues when a vertical-slice PR is merged into `dev`.
+# Closes supported issues when a linked PR is merged into `dev`.
 #
 # GitHub only interprets `Closes #N` keywords when the PR targets the
 # repository's default branch (`main`); vertical-slice PRs target `dev`, so
 # the keyword is ignored there. This workflow replicates the behavior: when a
 # PR to `dev` is merged, it closes every open issue referenced with a closing
-# keyword in the PR body. Only issues labeled `ai:vertical-slice` are closed,
-# mirroring the slice workflow's intent.
+# keyword in the PR body. Only issues labeled `ai:vertical-slice` or
+# `enhancement` are closed.
 name: Close linked issues
 
 on:
@@ -46,8 +46,11 @@ jobs:
                   repo: context.repo.repo,
                   issue_number,
                 });
-                if (!issue.labels.some((label) => label.name === 'ai:vertical-slice')) {
-                  core.info(`#${issue_number} is not a vertical-slice issue; skipping`);
+                const closesOnMerge = issue.labels.some(
+                  (label) => label.name === 'ai:vertical-slice' || label.name === 'enhancement',
+                );
+                if (!closesOnMerge) {
+                  core.info(`#${issue_number} has no supported close-on-merge label; skipping`);
                   continue;
                 }
                 await github.rest.issues.update({
