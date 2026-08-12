@@ -7,7 +7,7 @@ Successful transcription has one canonical plain-text form: decoder or timestamp
 ## Prerequisites
 
 - Slices 1-7 are implemented and their automated tests pass.
-- Terminal operational policy D6 remains in effect: rendering is append-only and terminal I/O failures propagate through `TerminalError`.
+- Terminal operational policy D6 remains in effect for terminal I/O failures. Slice 10 supersedes its append-only rendering rule with an in-place fixed interface.
 - Functional specification sections 6, 11, 13, 14, and 19.18 and architecture specification sections 3.4, 21, and 23 define the required contracts.
 
 ## Implementation Steps
@@ -21,14 +21,14 @@ Successful transcription has one canonical plain-text form: decoder or timestamp
 2. Keep the resulting canonical `String` unchanged through `AppEvent::TranscriptionCompleted`, controller output construction, and `Clipboard::copy_text`. Do not normalize or convert clipboard text in `app.rs` or `clipboard.rs`.
 3. In `src/terminal.rs`, make terminal serialization explicitly raw-mode-safe. Every logical line feed in a status block or output line, including an embedded line feed, must be written as `\r\n`. The renderer's appended line terminator must use the same convention.
 4. Use the smallest testable writer seam necessary to verify terminal bytes without a TTY, such as a private helper accepting `impl Write`. Keep `TerminalRenderer` responsible only for terminal I/O; do not move rendering behavior into the controller or add a terminal framework.
-5. Do not alter recording, worker lifecycle, cancellation, clipboard-service, or append-only history behavior delivered by prior slices.
+5. Do not alter recording, worker lifecycle, cancellation, clipboard-service, or canonical-text behavior delivered by prior slices. Slice 10 may replace the append-only renderer with its fixed interface.
 
 ## Automated Tests
 
 - Normalization trims segment-boundary whitespace, discards empty segments, collapses whitespace within and across segments, and joins remaining tokens with one space.
 - Normalization produces no newline merely because Whisper returned multiple segments and preserves ordinary punctuation as text.
 - A multiline status block is serialized with `\r\n` at every logical line ending, with no bare line feed bytes.
-- A persistent output item containing embedded logical newlines is serialized with `\r\n` at every logical line ending, including its renderer-appended terminator.
+- A transcription or notice containing embedded logical newlines is serialized with `\r\n` at every logical line ending when the fixed interface redraws it.
 - A completed canonical transcript reaches the fake clipboard byte-for-byte; terminal CRLF serialization is never applied to the clipboard payload.
 - Existing controller, worker, cancellation, and clipboard-failure tests continue to pass without a microphone, Whisper model, graphical clipboard, or interactive terminal.
 

@@ -808,28 +808,33 @@ Additional symbols, colors, elapsed-time counters, or animations may be implemen
 
 ---
 
-# 23. Preserving Transcription Output
+# 23. Fixed Terminal Interface
 
-Successful transcription output should remain part of normal terminal history rather than being erased immediately during subsequent state rendering.
+The renderer shall present a stable, bounded terminal interface throughout the session. It redraws the complete current view in place when display data changes; normal operation shall not append duplicate interface blocks or prior transcriptions to terminal history.
 
 A practical terminal design is therefore:
 
 ```text
-persistent output area
-----------------------
-previous transcription
-warnings/errors
+current status
+--------------
+Ready to record
 
-current status area
--------------------
-Recording...
-Ctrl+R Finish
-Esc Cancel
+latest transcription
+--------------------
+This is the most recent successful transcription.
+
+transient notice
+----------------
+Copied to clipboard.
+
+current commands
+----------------
+Ctrl+R  Start recording
 ```
 
-The implementation may accomplish this through simple line rendering rather than a full terminal-widget framework.
+The latest successful canonical transcription is application-owned display data. A successful completion replaces its value; cancelled or failed work does not remove or replace it. The controller also owns an optional transient notice for copy confirmation, recoverable errors, and clipboard warnings. A new notice replaces the previous one and does not remove the latest transcription.
 
-Append-only rendering shall preserve left-aligned logical lines across status changes and transcript output. The renderer must apply the terminal newline contract to both status blocks and persistent output, including a transcript containing embedded logical newlines.
+The implementation may use direct Crossterm operations but shall not introduce a full terminal-widget framework. Resize events shall cause the renderer to redraw the current complete view. The renderer must apply the terminal newline contract to every logical line in the fixed view, including text containing embedded logical newlines.
 
 ---
 
