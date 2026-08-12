@@ -21,7 +21,7 @@ The controller is a deterministic, hardware-free state machine driven by focused
    - Ready + Cancel and Transcribing + ToggleRecording leave state unchanged.
 4. Make terminal input map Crossterm Ctrl+R to `ToggleRecording`, Esc to `Cancel`, and ignore all other events. Do not install OS-level key hooks.
 5. Poll terminal input with a bounded timeout, drain worker events promptly, apply transitions, then render only when view data changes. Never block on inference.
-6. Design rendering around persistent terminal history plus current status. It must show distinct Ready, Recording, Transcribing, and `Cancelling transcription...` status while treating the latter as a Transcribing substate.
+6. Design rendering around current status and display data. It must show distinct Ready, Recording, Transcribing, and `Cancelling transcription...` status while treating the latter as a Transcribing substate. Slice 10 supersedes this slice's original persistent-history renderer with a fixed in-place interface.
 7. Define how state actions report errors and output lines without giving terminal rendering ownership of business behavior.
 
 ## Automated Tests

@@ -2,7 +2,7 @@
 
 ## Outcome
 
-A completed recording is transcribed locally by one long-lived background worker that owns the loaded Whisper model. The main terminal loop stays responsive, prints only final successful text, preserves that output in terminal history, and supports repeated successful cycles without reloading the model.
+A completed recording is transcribed locally by one long-lived background worker that owns the loaded Whisper model. The main terminal loop stays responsive, displays only final successful text, and supports repeated successful cycles without reloading the model. Slice 10 defines the fixed-interface presentation that retains only the latest successful text.
 
 ## Prerequisites
 

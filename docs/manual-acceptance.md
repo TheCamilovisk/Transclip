@@ -50,78 +50,96 @@ pipe:
 
 ## Expected terminal output
 
-Status blocks (append-only; previous statuses and results stay in the
-terminal history):
+The application redraws one fixed interface in place. The current status and
+commands are always visible; the latest successful transcription remains
+visible until a later successful transcription replaces it. Normal state
+changes must not append duplicated interface blocks to terminal history.
+
+Only the status line is styled (functional spec criterion 21): the state
+emoji and color are scoped to it, and every following logical line
+(transcription, notice, commands) stays in the terminal default color.
 
 ```text
-Ready to record
+🟢 Ready to record
 
 Ctrl+R  Start recording
 ```
 
+The `🟢` status is rendered in light green.
+
 ```text
-Recording...
+🔴 Recording...
 
 Ctrl+R  Finish
 Esc     Cancel
 ```
 
+The `🔴` status is rendered in light red.
+
 ```text
-Transcribing...
+⚙️ Transcribing...
 
 Esc     Cancel
 ```
 
 ```text
-Cancelling transcription...
+⚙️ Cancelling transcription...
 
 Esc     Cancel
 ```
 
-Successful cycle (the printed text must equal the clipboard content):
+The `⚙️` statuses render in the terminal default color.
+
+Successful cycle (the displayed text must equal the clipboard content):
 
 ```text
-Transcription:
+🟢 Ready to record
 
 This is the text that was recorded.
 
 Copied to clipboard.
 
-Ready to record
-
 Ctrl+R  Start recording
 ```
+
+The transcription remains neutral while the `🟢` Ready status is light green.
 
 Recoverable errors keep the app usable:
 
 ```text
+🟢 Ready to record
+
 Error: unable to start recording: <reason>
 
-Ready to record
+Ctrl+R  Start recording
 ```
 
 ```text
+🟢 Ready to record
+
 Error: recording failed: <reason>
 
-Ready to record
+Ctrl+R  Start recording
 ```
 
 ```text
+🟢 Ready to record
+
 Error: transcription failed: <reason>
 
-Ready to record
+Ctrl+R  Start recording
 ```
 
 Clipboard failure keeps the successful transcription (functional spec 15.4):
 
 ```text
-Transcription:
+🟢 Ready to record
 
 This is the text that was recorded.
 
 Warning: unable to copy transcription to clipboard: <reason>
 
-Ready to record
+Ctrl+R  Start recording
 ```
 
 Startup failure (model provisioning/load or terminal init) prints a clear
@@ -139,11 +157,13 @@ Startup failure (model provisioning/load or terminal init) prints a clear
 | 6 | Microphone failure | Start with no default input device (or force failure) | Error line, app remains/returns usable `Ready to record`. |
 | 7 | Transcription failure | Any capture (silent audio gives empty text, not failure) | Error line, no clipboard write, usable `Ready to record`. |
 | 8 | Clipboard failure | No `DISPLAY`/`WAYLAND_DISPLAY` (headless) | Printed text plus `Warning: unable to copy...`, usable `Ready to record`. |
-| 9 | Multiple cycles | Working microphone; display session | Several record/transcribe cycles without restart or model reload; one job at a time; no stale text between cycles. |
+| 9 | Multiple cycles | Working microphone; display session | Several record/transcribe cycles without restart or model reload; one job at a time; only the newest successful transcription is visible; no prior result or duplicated UI block remains. |
 | 10 | Focus behavior | Terminal emulator | `Ctrl+R`/`Esc` work only while the terminal is focused; typing in another window never triggers Transclip (no global interception). |
 | 11 | X11 and Wayland | One X11 session and one Wayland session | Clipboard behavior validated on both session types (X11 through arboard/x11rb; Wayland through `wl-clipboard-rs`). |
 | 12 | Ctrl+C / error exit | Any state (Ready, Recording, Transcribing) | Recorder/worker cleanup follows the bounded shutdown policy; terminal restored (cursor shown, raw mode off); exit code 0. |
 | 13 | Automatic language detection | Working microphone; display session; a Portuguese utterance and a later utterance in another supported language | Each final result remains in its spoken language rather than being translated to English. Portuguese output is readable Portuguese; the second recording is detected independently without restarting or reloading the model. |
+| 14 | Fixed UI replacement | Working microphone; display session; two distinct spoken utterances | After each completion, status, commands, one latest transcription, and one notice occupy the same fixed interface. The second transcript replaces the first; resize redraws the current interface without losing it. |
+| 15 | State visual feedback | Color-capable terminal; display session | Ready shows `🟢` light green; Recording shows `🔴` light red; Transcribing and Cancelling show `⚙️` in the default color. Only the status line is styled: transcription, notices, and command hints remain neutral, and a resize redraw never bleeds the status color into them. |
 
 ## Record-keeping
 

@@ -21,8 +21,8 @@ use app::{App, AppEvent, TranscriptionJob};
 use clipboard::{ArboardClipboard, Clipboard};
 use recorder::{CpalRecorder, Recorder};
 use transcriber::{
-    Downloader, ModelRelease, WhisperTranscriber, ensure_model, load_model, model_cache_dir,
-    spawn_worker,
+    Downloader, ModelRelease, WhisperTranscriber, ensure_model, install_logging_hook, load_model,
+    model_cache_dir, spawn_worker,
 };
 
 /// Provisions and loads the pinned model. Any failure here prevents the
@@ -34,6 +34,11 @@ fn startup(
     release: &ModelRelease,
     downloader: &dyn Downloader,
 ) -> anyhow::Result<whisper_rs::WhisperContext> {
+    // The app owns the terminal, so native diagnostics must never surface:
+    // install the logging hook before the first native Whisper operation
+    // (architecture section 21) so Whisper and GGML model-loading information
+    // cannot precede or corrupt the fixed interface (functional spec 11).
+    install_logging_hook();
     let (model_path, outcome) =
         ensure_model(cache_dir, release, downloader).context("model provisioning failed")?;
     if outcome == transcriber::ProvisionOutcome::Downloaded {

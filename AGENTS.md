@@ -19,3 +19,10 @@
 - Implement `docs/implementation-plans/` slices strictly in index order. Read `00-index.md` and resolve applicable gates in `01-decision-register.md` before coding.
 - Preserve the flat `src/` layout and have infrastructure return values/events rather than mutate application state or render directly.
 - For slice work, use the appropriate agent-local skills. Publication skills push only the current `vs-NNN_*` branch and open or return its PR against `dev`; never approve, merge, or close the issue without an explicit request.
+
+## Enhancements
+
+- Start enhancement work with `.opencode/skills/start-enhancement-issue/scripts/start-enhancement-issue.sh ISSUE_NUMBER`. It verifies an open `enhancement` issue, synchronizes `dev` with `origin/dev`, and creates `enhan_kebab-case-title` from `dev`.
+- Update the applicable functional and architecture specifications before implementation. Add an indexed implementation-plan slice and resolve its decision gates when the enhancement requires planned implementation work.
+- Publish committed enhancement work only with `.opencode/skills/publish-enhancement-issue/scripts/publish-enhancement-issue.sh ISSUE_NUMBER`. It pushes the current `enhan_*` branch and opens or returns a PR against `dev`; never approve, merge, request review, or close an issue directly.
+- All GitHub interactions in the enhancement workflow must be executed through those supporting scripts. The linked open `enhancement` issue closes automatically only after its PR merges into `dev`.
