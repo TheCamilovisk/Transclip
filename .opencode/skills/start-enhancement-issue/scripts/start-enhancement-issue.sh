@@ -11,7 +11,7 @@ usage() {
 Usage: start-enhancement-issue.sh [--json] [--repo OWNER/NAME] ISSUE_NUMBER
 
 Verifies that ISSUE_NUMBER is open and labeled enhancement, requires a clean
-worktree and local dev equal to origin/dev, then creates
+worktree, fast-forwards local dev to origin/dev, then creates
 enhan_kebab-case-title from dev. All GitHub queries are performed here.
 EOF
   exit "${1:-0}"
@@ -73,6 +73,7 @@ if ! printf '%s' "$issue" | jq -e '[.labels[].name] | index("enhancement") != nu
   exit 1
 fi
 
+title="$(printf '%s' "$issue" | jq -r '.title')"
 slug="$(printf '%s' "$title" \
   | tr '[:upper:]' '[:lower:]' \
   | tr -cs '[:alnum:]' '-' \
@@ -88,8 +89,8 @@ if ! git show-ref --verify --quiet refs/heads/dev; then
   echo "error: local dev branch does not exist" >&2
   exit 1
 fi
-if [[ "$(git rev-parse dev)" != "$(git rev-parse origin/dev)" ]]; then
-  echo "error: local dev is not synchronized with origin/dev; update dev first" >&2
+if ! git merge-base --is-ancestor dev origin/dev; then
+  echo "error: local dev has commits not in origin/dev; resolve the divergence first" >&2
   exit 1
 fi
 if git show-ref --verify --quiet "refs/heads/$branch" || git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
@@ -98,6 +99,7 @@ if git show-ref --verify --quiet "refs/heads/$branch" || git ls-remote --exit-co
 fi
 
 git switch dev
+git merge --ff-only origin/dev
 git switch -c "$branch"
 
 if [[ "$JSON_OUT" == "yes" ]]; then
