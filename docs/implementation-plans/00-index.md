@@ -33,6 +33,7 @@ The release workflow is `Ctrl+R` to record, `Ctrl+R` to submit the completed rec
 | 9 | `10-automatic-language-detection.md` | Per-recording multilingual Whisper detection and transcription | Slice 8, D1 |
 | 10 | `11-fixed-terminal-ui-latest-transcription.md` | In-place terminal UI with one replaceable latest transcription | Slice 9, D7 |
 | 11 | `12-clean-whisper-model-information-display.md` | Whisper/GGML log suppression before model loading | Slice 10 |
+| 12 | `13-state-visual-feedback.md` | State emoji and scoped terminal colors | Slice 11, D8 |
 
 ## Shared Contracts
 
@@ -59,4 +60,4 @@ Exact ownership and error types can vary, but every terminal worker outcome must
 - State-machine tests run with no microphone, clipboard, Whisper model, or interactive terminal.
 - No user audio, transcription, or clipboard content is sent over the network. Network access is confined to first-run model provisioning.
 - Manual Linux acceptance confirms microphone capture, focused terminal input, local Whisper inference, cancellation responsiveness, X11 and Wayland clipboard behavior, and terminal restoration.
-- The full functional acceptance list in functional specification section 19 is traceably covered by slices 1-10.
+- The full functional acceptance list in functional specification section 19 is traceably covered by slices 1-12.

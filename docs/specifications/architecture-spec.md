@@ -1673,6 +1673,14 @@ The state machine and core application behavior should remain platform-independe
 
 ---
 
+## ADR-14 — Renderer-Owned State Styling
+
+**Decision:** Render state emoji and ANSI color only at the terminal boundary, and reset styling after the status line.
+
+**Reason:** State feedback is presentation-only. Keeping styling outside controller data prevents color escape sequences from leaking into transcriptions, notices, the clipboard, or native Whisper output.
+
+---
+
 # 52. Dependencies
 
 The core dependency categories are:
