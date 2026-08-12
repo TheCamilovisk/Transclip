@@ -24,7 +24,8 @@ The user must provide the enhancement issue number. If it is missing, ask for it
    - the worktree is clean;
    - local `dev` exactly matches `origin/dev` after fetching;
    - the new `enhan_kebab-case-title` branch is created from `dev`.
-3. Read the issue requirements through the script output and then update the applicable functional and architecture specifications. Add a new implementation-plan slice only when the enhancement requires one; append it in index order and resolve any applicable decision gates before coding.
-4. Use `publish-enhancement-issue` only after the intended work is committed.
+3. Read the issue requirements through the script output. Update `docs/specifications/functional-spec.md` and `docs/specifications/architecture-spec.md` as required to fully capture them. Create an indexed vertical-slice implementation plan in `docs/implementation-plans/`, update `00-index.md`, and resolve applicable gates in `01-decision-register.md`.
+4. Do not modify application code, tests, dependencies, or runtime documentation. This workflow prepares specifications and plans only; a later vertical-slice implementation workflow performs code changes in its own pull request.
+5. Use `publish-enhancement-issue` only after the intended documentation work is committed.
 
 The script must remain the exclusive path for GitHub access in this workflow. Do not call `gh` directly from the skill procedure.

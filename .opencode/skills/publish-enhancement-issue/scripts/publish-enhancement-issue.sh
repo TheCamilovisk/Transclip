@@ -12,10 +12,12 @@ ISSUE=""
 usage() {
   cat <<'EOF'
 Usage: publish-enhancement-issue.sh [--dry-run] [--json] [--repo OWNER/NAME]
-                                    [--base BRANCH] [--body-file FILE] ISSUE_NUMBER
+                                    [--base BRANCH] [--body-file FILE] [ISSUE_NUMBER]
 
 Validates the current enhan_kebab-case-title branch and its linked open
 enhancement issue, then pushes the branch and creates or returns a PR to dev.
+When ISSUE_NUMBER is omitted, resolves the issue from the current branch's
+title slug among open enhancement issues.
 The script never approves, merges, requests review, or closes an issue.
 EOF
   exit "${1:-0}"
@@ -48,7 +50,7 @@ for command in gh git jq; do
   fi
 done
 
-if [[ ! "$ISSUE" =~ ^[1-9][0-9]*$ ]]; then
+if [[ -n "$ISSUE" && ! "$ISSUE" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: ISSUE_NUMBER must be a positive integer" >&2
   usage 2
 fi
@@ -70,6 +72,21 @@ if [[ -z "$REPO" ]]; then
     echo "error: could not determine the repository; run inside it or pass --repo OWNER/NAME" >&2
     exit 1
   fi
+fi
+
+if [[ -z "$ISSUE" ]]; then
+  branch_slug="${branch#enhan_}"
+  matches="$(gh issue list --repo "$REPO" --state open --label enhancement --limit 100 \
+    --json number,title \
+    | jq --arg branch_slug "$branch_slug" \
+      '[.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-|-$"; "")) == $branch_slug)]')"
+  match_count="$(printf '%s' "$matches" | jq 'length')"
+  if [[ "$match_count" != "1" ]]; then
+    echo "error: could not uniquely resolve an open enhancement issue from branch $branch" >&2
+    echo "pass ISSUE_NUMBER explicitly or use an enhan_ branch whose slug exactly matches one open enhancement issue title" >&2
+    exit 1
+  fi
+  ISSUE="$(printf '%s' "$matches" | jq -r '.[0].number')"
 fi
 
 issue="$(gh issue view "$ISSUE" --repo "$REPO" --json number,title,state,labels,url 2>/dev/null || true)"

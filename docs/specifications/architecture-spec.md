@@ -775,6 +775,8 @@ The renderer receives logical text, not terminal-specific payload bytes. It shal
 
 This serialization belongs exclusively to terminal presentation. The controller, transcriber, and clipboard boundary exchange canonical transcription text without terminal line-ending conversion.
 
+Before any native Whisper operation, including loading the model or creating decoder state, startup shall install the `whisper-rs` logging hook with no log backend enabled. This suppresses Whisper and GGML diagnostics so native model information cannot precede or corrupt the fixed terminal interface.
+
 ---
 
 # 22. Rendering by State
